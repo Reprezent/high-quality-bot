@@ -1,0 +1,4 @@
+[submodule "vendor/wowsims-mop"]
+	path = vendor/wowsims-mop
+	url = https://github.com/wowsims/mop.git
+	branch = master

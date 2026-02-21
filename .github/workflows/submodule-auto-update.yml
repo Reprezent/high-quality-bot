@@ -1,0 +1,38 @@
+name: Auto-update wowsims submodule
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-submodule:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          submodules: recursive
+
+      - name: Update wowsims submodule
+        run: |
+          git submodule sync --recursive
+          git submodule update --init --recursive --remote --merge vendor/wowsims-mop
+
+      - name: Commit and push if changed
+        run: |
+          if git diff --quiet -- vendor/wowsims-mop .gitmodules; then
+            echo "No submodule updates available"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add vendor/wowsims-mop .gitmodules
+          git commit -m "chore: auto-update wowsims/mop submodule"
+          git push

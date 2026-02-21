@@ -69,6 +69,60 @@ This starts:
 | `POSTGRES_DB` | — | `highqualitybot` | DB name (docker-compose only) |
 | `RUST_LOG` | — | `info` | Log level |
 
+## Using `wowsims/mop` Protobufs in Rust
+
+This project includes an optional `mop-proto` feature that compiles upstream `.proto` files from `wowsims/mop` into Rust types using `prost`.
+
+1. Add the upstream repo as a submodule:
+
+   ```bash
+   git submodule add https://github.com/wowsims/mop.git vendor/wowsims-mop
+   git submodule update --init --recursive
+   ```
+
+2. Install `protoc` if it is not already available:
+
+   ```bash
+   # Ubuntu/Debian
+   sudo apt-get update && sudo apt-get install -y protobuf-compiler
+   ```
+
+3. Build/check with protobuf generation enabled:
+
+   ```bash
+   cargo check --features mop-proto
+   ```
+
+Generated types are available under `crate::mop_proto::mop`.
+
+Example:
+
+```rust
+#[cfg(feature = "mop-proto")]
+use crate::mop_proto::mop::RaidSimRequest;
+```
+
+### Optional: Custom proto path
+
+If you want to source protos from a different checkout path, set `MOP_PROTO_DIR`:
+
+```bash
+MOP_PROTO_DIR=/absolute/path/to/mop/proto cargo check --features mop-proto
+```
+
+### Updating upstream
+
+```bash
+git submodule update --remote --merge vendor/wowsims-mop
+git add vendor/wowsims-mop .gitmodules
+```
+
+The repository also includes an automatic updater workflow:
+
+- `.github/workflows/submodule-auto-update.yml`
+- Runs every 6 hours and on manual dispatch
+- Updates `vendor/wowsims-mop` and commits the new submodule pointer automatically when upstream changes
+
 ## CI/CD
 
 A GitHub Actions workflow (`.github/workflows/docker.yml`) automatically:

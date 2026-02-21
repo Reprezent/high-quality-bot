@@ -1,5 +1,6 @@
 mod commands;
 mod db;
+pub mod mop_proto;
 
 use anyhow::Result;
 use poise::serenity_prelude as serenity;
