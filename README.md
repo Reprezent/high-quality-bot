@@ -6,17 +6,19 @@ A Discord bot written in Rust that runs World of Warcraft simulations via slash 
 
 | Command | Description |
 |---------|-------------|
-| `/sim <class>:<spec> <gear_json>` | Queue a WoW simulation for the given class/spec with a JSON gear payload. Returns a run ID. |
+| `/sim <gear_json>` | Queue a WoW simulation from a WoWSims JSON payload (must include player class/spec). Returns a run ID. |
 | `/class <class>[:<spec>]` | Save your default class (and optionally spec) to the database. |
 | `/status <run-id>` | Check the current status of a simulation run by its UUID. |
+| `/health` | Check if the bot can reach PostgreSQL and the wowsims async API. |
 
 ### Examples
 
 ```
-/sim warrior:arms {"head":{"id":123},"chest":{"id":456}}
+/sim {"player":{"class":"ClassWarrior","armsWarrior":{},"equipment":{"items":[{"id":123}]}}}
 /class warrior:arms
 /class paladin
 /status 550e8400-e29b-41d4-a716-446655440000
+/health
 ```
 
 ## Prerequisites
@@ -56,17 +58,22 @@ docker compose up -d
 
 This starts:
 - **`db`** — PostgreSQL 16 with a persistent named volume
-- **`bot`** — the Discord bot, waiting for the database to be healthy before starting
+- **`sim`** — the vendored `wowsims/mop` async simulation API on port `3333` (built with `-tags with_db` so item IDs resolve correctly)
+- **`bot`** — the Discord bot, waiting for both `db` and `sim` to be healthy before starting
 
 ## Environment Variables
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `DISCORD_TOKEN` | ✅ | — | Discord bot token |
-| `DATABASE_URL` | ✅ | — | PostgreSQL connection URL |
 | `POSTGRES_USER` | — | `botuser` | DB username (docker-compose only) |
 | `POSTGRES_PASSWORD` | — | `changeme` | DB password (docker-compose only) |
 | `POSTGRES_DB` | — | `highqualitybot` | DB name (docker-compose only) |
+| `POSTGRES_HOST` | — | `localhost` (local) / `db` (docker-compose) | DB host used by bot |
+| `POSTGRES_PORT` | — | `5432` | DB port used by bot |
+| `WOWSIMS_API_BASE_URL` | — | `http://127.0.0.1:3333` (local) / `http://sim:3333` (docker-compose) | Base URL for wowsims async sim API (`/raidSimAsync`, `/asyncProgress`) |
+| `LOG_SIM_REQUEST_JSON` | — | `false` | When true (`1/true/yes/on`), logs outgoing raid sim request as pretty JSON before calling backend |
+| `WOWSIMS_SIM_DEBUG` | — | `false` | When true (`1/true/yes/on`), sends `simOptions.debug=true` to backend sim |
 | `RUST_LOG` | — | `info` | Log level |
 
 ## Using `wowsims/mop` Protobufs in Rust
@@ -116,6 +123,19 @@ MOP_PROTO_DIR=/absolute/path/to/mop/proto cargo check --features mop-proto
 git submodule update --remote --merge vendor/wowsims-mop
 git add vendor/wowsims-mop .gitmodules
 ```
+
+### Running the local async sim API
+
+The bot now calls the wowsims async API endpoints (`raidSimAsync` + `asyncProgress`).
+
+Run from the submodule checkout:
+
+```bash
+cd vendor/wowsims-mop
+go run ./sim/web --host=127.0.0.1:3333 --launch=false --usefs=false
+```
+
+If you are using `docker compose up`, this API is started automatically via the `sim` service.
 
 The repository also includes an automatic updater workflow:
 
