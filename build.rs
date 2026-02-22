@@ -1,5 +1,5 @@
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=MOP_PROTO_DIR");
@@ -21,24 +21,27 @@ fn main() {
         );
     }
 
-    let proto_files = collect_proto_files(&proto_dir);
-    if proto_files.is_empty() {
-        panic!("No .proto files found in {}", proto_dir.display());
+    let proto_dir = std::fs::canonicalize(&proto_dir)
+        .unwrap_or_else(|err| panic!("Unable to canonicalize proto dir {}: {err}", proto_dir.display()));
+
+    let api_proto = proto_dir.join("api.proto");
+    if !api_proto.exists() {
+        panic!("api.proto not found in {}", proto_dir.display());
     }
 
-    prost_build::Config::new()
-        .compile_protos(&proto_files, &[proto_dir])
+    let mut includes = vec![proto_dir.clone()];
+    let system_include = PathBuf::from("/usr/include");
+    if system_include.exists() {
+        includes.push(system_include);
+    }
+
+    let out_dir = PathBuf::from(
+        env::var("OUT_DIR").expect("OUT_DIR environment variable missing during build"),
+    );
+
+    let mut config = prost_build::Config::new();
+    config.file_descriptor_set_path(out_dir.join("mop_descriptor.bin"));
+    config
+        .compile_protos(&[api_proto], &includes)
         .expect("failed to compile wowsims/mop protobuf files");
-}
-
-fn collect_proto_files(proto_dir: &Path) -> Vec<PathBuf> {
-    let mut files = std::fs::read_dir(proto_dir)
-        .unwrap_or_else(|err| panic!("Unable to read {}: {err}", proto_dir.display()))
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("proto"))
-        .collect::<Vec<_>>();
-
-    files.sort();
-    files
 }

@@ -14,15 +14,43 @@ services:
       timeout: 5s
       retries: 5
 
+  sim:
+    build:
+      context: .
+      dockerfile: Dockerfile.sim
+    image: high-quality-sim:local
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    environment:
+      SIM_VERBOSE_LOGGING: ${SIM_VERBOSE_LOGGING:-true}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:3333/version >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
   bot:
-    image: ghcr.io/${GITHUB_REPOSITORY:-reprezent/high-quality-bot}:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: high-quality-bot:local
     restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
+      sim:
+        condition: service_healthy
     environment:
       DISCORD_TOKEN: ${DISCORD_TOKEN}
-      DATABASE_URL: postgres://${POSTGRES_USER:-botuser}:${POSTGRES_PASSWORD:-changeme}@db:5432/${POSTGRES_DB:-highqualitybot}
+      POSTGRES_HOST: ${POSTGRES_HOST:-db}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_USER: ${POSTGRES_USER:-botuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: ${POSTGRES_DB:-highqualitybot}
+      WOWSIMS_API_BASE_URL: ${WOWSIMS_API_BASE_URL:-http://sim:3333}
+      WOWSIMS_SIM_DEBUG: ${WOWSIMS_SIM_DEBUG:-false}
+      LOG_SIM_REQUEST_JSON: ${LOG_SIM_REQUEST_JSON:-true}
       RUST_LOG: ${RUST_LOG:-info}
 
 volumes:

@@ -1,0 +1,35 @@
+FROM golang:1.25 AS builder
+
+WORKDIR /src
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    protobuf-compiler \
+    libprotobuf-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY vendor/wowsims-mop/go.mod vendor/wowsims-mop/go.sum ./
+RUN go mod download
+RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+
+COPY vendor/wowsims-mop .
+
+RUN protoc -I=./proto -I=/usr/include --go_out=./sim/core ./proto/*.proto
+RUN mkdir -p binary_dist/mop && touch binary_dist/mop/embedded && cp sim/web/dist.go.tmpl binary_dist/dist.go
+
+RUN go build -tags with_db -o /out/wowsims-sim ./sim/web
+
+FROM debian:bookworm-slim AS runtime
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /out/wowsims-sim /app/wowsims-sim
+
+EXPOSE 3333
+
+ENTRYPOINT ["/app/wowsims-sim"]
+CMD ["--host=0.0.0.0:3333", "--launch=false", "--usefs=false"]

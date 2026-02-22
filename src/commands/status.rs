@@ -3,6 +3,14 @@ use crate::Context;
 use anyhow::Result;
 use uuid::Uuid;
 
+fn format_metric(value: f64) -> String {
+    if value.is_finite() {
+        format!("{value:.2}")
+    } else {
+        "n/a".to_string()
+    }
+}
+
 /// Check the status of a simulation run.
 ///
 /// Usage: `/status <run-id>`
@@ -35,15 +43,45 @@ pub async fn status(
                 _ => "❓",
             };
 
+            let progress_line = match db::get_latest_simulation_progress_frame(pool, uuid).await? {
+                Some(frame) if frame.total_iterations > 0 => {
+                    let dps = format_metric(frame.dps);
+                    let hps = format_metric(frame.hps);
+                    format!(
+                        "• Progress: **{}/{} iterations** ({:.1}%) | DPS {} | HPS {}",
+                        frame.completed_iterations,
+                        frame.total_iterations,
+                        (frame.completed_iterations as f64 / frame.total_iterations as f64) * 100.0,
+                        dps,
+                        hps,
+                    )
+                }
+                Some(frame) => format!(
+                    "• Progress frame #{}, sims {}/{}",
+                    frame.frame_index, frame.completed_sims, frame.total_sims
+                ),
+                None => "• Progress: no frames yet".to_string(),
+            };
+
+            let raid_members_line = if run.raid_members.is_empty() {
+                "• Raid Members: n/a".to_string()
+            } else {
+                format!("• Raid Members: {}", run.raid_members.join(", "))
+            };
+
             ctx.say(format!(
                 "{status_emoji} **Simulation `{run_id}`**\n\
                  • Class/Spec: **{class}/{spec}**\n\
                  • Status: **{status}**\n\
+                 {progress_line}\n\
+                 {raid_members_line}\n\
                  • Submitted: {created_at}\n\
                  • Results: <https://example.com/sim/{run_id}>",
                 class = run.class,
                 spec = run.spec,
                 status = run.status,
+                progress_line = progress_line,
+                raid_members_line = raid_members_line,
                 created_at = run.created_at.format("%Y-%m-%d %H:%M UTC"),
             ))
             .await?;
