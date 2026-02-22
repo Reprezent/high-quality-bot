@@ -98,6 +98,14 @@ fn extract_class_spec_from_payload(payload: &Value) -> Option<(String, String)> 
     Some((normalize_class(class), spec.to_string()))
 }
 
+fn format_metric(value: f64) -> String {
+    if value.is_finite() {
+        format!("{value:.2}")
+    } else {
+        "n/a".to_string()
+    }
+}
+
 /// Run a World of Warcraft simulation from a WoWSims JSON payload.
 ///
 /// Usage: `/sim <json payload>`
@@ -124,6 +132,9 @@ pub async fn sim(
     };
 
     let user_id = ctx.author().id.to_string();
+    let user_id_for_reply = ctx.author().id;
+    let channel_id = ctx.channel_id();
+    let http = ctx.serenity_context().http.clone();
     let pool = &ctx.data().db;
 
     // Save run to database
@@ -136,15 +147,66 @@ pub async fn sim(
             tracing::error!(run_id = %run_id, error = ?err, "async simulation failed");
             let _ = db::update_simulation_run_status(&pool_for_task, run_id, "failed").await;
         }
+
+        let completion_message = match db::get_simulation_run(&pool_for_task, run_id).await {
+            Ok(Some(run)) => {
+                let mention = format!("<@{}>", user_id_for_reply.get());
+
+                let progress_line = match db::get_latest_simulation_progress_frame(&pool_for_task, run_id).await {
+                    Ok(Some(frame)) if frame.total_iterations > 0 => {
+                        let dps = format_metric(frame.dps);
+                        let hps = format_metric(frame.hps);
+                        format!(
+                            "• Final Progress: **{}/{} iterations** ({:.1}%) | DPS {} | HPS {}",
+                            frame.completed_iterations,
+                            frame.total_iterations,
+                            (frame.completed_iterations as f64 / frame.total_iterations as f64) * 100.0,
+                            dps,
+                            hps,
+                        )
+                    }
+                    Ok(Some(frame)) => format!(
+                        "• Final Progress: frame #{}, sims {}/{}",
+                        frame.frame_index, frame.completed_sims, frame.total_sims
+                    ),
+                    Ok(None) => "• Final Progress: no frames recorded".to_string(),
+                    Err(_) => "• Final Progress: unavailable".to_string(),
+                };
+
+                let status_emoji = if run.status == "complete" { "✅" } else { "❌" };
+                let status_label = if run.status == "complete" {
+                    "Complete"
+                } else {
+                    "Failed"
+                };
+
+                format!(
+                    "{status_emoji} {mention} sim **{class}/{spec}**: **{status_label}**.\n\
+                     {progress_line}\n\
+                     • Run ID: `{run_id}`",
+                    class = run.class,
+                    spec = run.spec,
+                )
+            }
+            Ok(None) => format!(
+                "❌ <@{}> sim `{run_id}` finished, but details were not found.",
+                user_id_for_reply.get()
+            ),
+            Err(_) => format!(
+                "❌ <@{}> sim `{run_id}` finished, but I couldn't load final status.",
+                user_id_for_reply.get()
+            ),
+        };
+
+        if let Err(error) = channel_id.say(&http, completion_message).await {
+            tracing::warn!(run_id = %run_id, error = ?error, "failed to send simulation completion message");
+        }
     });
 
     // Acknowledge quickly so Discord doesn't time out
     ctx.say(format!(
         "✅ Got your sim request for **{class}/{spec}**!\n\
-         Your simulation has been queued and started asynchronously.\n\
-         **Run ID:** `{run_id}`\n\
-         Use `/status {run_id}` to check progress.\n\
-         Once complete, your results will be available at: <https://example.com/sim/{run_id}>"
+         • Run ID: `{run_id}`"
     ))
     .await?;
 
