@@ -75,8 +75,7 @@ pub async fn status(
                  • Status: **{status}**\n\
                  {progress_line}\n\
                  {raid_members_line}\n\
-                 • Submitted: {created_at}\n\
-                 • Results: <https://example.com/sim/{run_id}>",
+                 • Submitted: {created_at}",
                 class = run.class,
                 spec = run.spec,
                 status = run.status,

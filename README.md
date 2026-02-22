@@ -145,12 +145,16 @@ The repository also includes an automatic updater workflow:
 
 ## CI/CD
 
-A GitHub Actions workflow (`.github/workflows/docker.yml`) automatically:
+The official GitHub Actions workflow (`.github/workflows/docker.yml`) automatically:
 
-- Builds the Docker image on every push/PR to `main`
-- Pushes the image to **GitHub Container Registry** (`ghcr.io/<owner>/<repo>:latest`) on pushes to `main`
-
-The image is tagged with both `latest` and the short commit SHA.
+- Builds both Docker images (`Dockerfile` for bot, `Dockerfile.sim` for sim) on every PR to `main`
+- On merges/pushes to `main`, pushes both images to **GitHub Container Registry**:
+   - `ghcr.io/<owner>/<repo>-bot`
+   - `ghcr.io/<owner>/<repo>-sim`
+- Applies versioned tags on `main` pushes:
+   - `latest`
+   - `sha-<short-commit>`
+   - `vYYYY.MM.DD-HHMMSS-<short-commit>` (UTC)
 
 ## Database Schema
 

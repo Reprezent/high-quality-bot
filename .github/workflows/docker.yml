@@ -1,4 +1,4 @@
-name: Build and Push Docker Image
+name: Docker Images
 
 on:
   push:
@@ -7,10 +7,10 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build-and-push:
@@ -18,6 +18,13 @@ jobs:
     permissions:
       contents: read
       packages: write
+    strategy:
+      matrix:
+        include:
+          - image_name: bot
+            dockerfile: Dockerfile
+          - image_name: sim
+            dockerfile: Dockerfile.sim
 
     steps:
       - name: Checkout repository
@@ -25,8 +32,15 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Compute image version
+        id: version
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          TIMESTAMP_TAG="$(date -u +'%Y.%m.%d-%H%M%S')"
+          echo "value=v${TIMESTAMP_TAG}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
       - name: Log in to the Container Registry
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -37,9 +51,10 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ github.repository }}-${{ matrix.image_name }}
           tags: |
-            type=sha,format=short
+            type=raw,value=${{ steps.version.outputs.value }},enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,format=short,prefix=sha-
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Set up Docker Buildx
@@ -49,8 +64,10 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: ${{ github.event_name == 'push' }}
+          file: ${{ matrix.dockerfile }}
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max
