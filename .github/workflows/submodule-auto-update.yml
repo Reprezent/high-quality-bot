@@ -21,7 +21,7 @@ jobs:
 
       - name: Update wowsims submodule
         run: |
-          git submodule foreach git pull origin master --ff-only
+          git submodule foreach git pull origin master --no-ff
 
       - name: Commit and push if changed
         run: |
