@@ -43,6 +43,7 @@ services:
         condition: service_healthy
     environment:
       DISCORD_TOKEN: ${DISCORD_TOKEN}
+      DISCORD_GUILD_ID: ${DISCORD_GUILD_ID:-}
       POSTGRES_HOST: ${POSTGRES_HOST:-db}
       POSTGRES_PORT: ${POSTGRES_PORT:-5432}
       POSTGRES_USER: ${POSTGRES_USER:-botuser}

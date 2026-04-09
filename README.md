@@ -10,6 +10,7 @@ A Discord bot written in Rust that runs World of Warcraft simulations via slash 
 | `/class <class>[:<spec>]` | Save your default class (and optionally spec) to the database. |
 | `/status <run-id>` | Check the current status of a simulation run by its UUID. |
 | `/health` | Check if the bot can reach PostgreSQL and the wowsims async API. |
+| `/piss` | Fetch the current ISS urine tank fill level from the public ISS telemetry stream. |
 
 ### Examples
 
@@ -19,6 +20,7 @@ A Discord bot written in Rust that runs World of Warcraft simulations via slash 
 /class paladin
 /status 550e8400-e29b-41d4-a716-446655440000
 /health
+/piss
 ```
 
 ## Prerequisites
@@ -53,6 +55,7 @@ A Discord bot written in Rust that runs World of Warcraft simulations via slash 
 ```bash
 cp .env.example .env
 # Set DISCORD_TOKEN in .env
+# Optional: set DISCORD_GUILD_ID for instant guild-scoped slash command updates
 docker compose up -d
 ```
 
@@ -66,6 +69,7 @@ This starts:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `DISCORD_TOKEN` | ✅ | — | Discord bot token |
+| `DISCORD_GUILD_ID` | — | empty | When set, registers slash commands only in that guild for faster iteration; when unset, registers globally |
 | `POSTGRES_USER` | — | `botuser` | DB username (docker-compose only) |
 | `POSTGRES_PASSWORD` | — | `changeme` | DB password (docker-compose only) |
 | `POSTGRES_DB` | — | `highqualitybot` | DB name (docker-compose only) |
@@ -75,6 +79,8 @@ This starts:
 | `LOG_SIM_REQUEST_JSON` | — | `false` | When true (`1/true/yes/on`), logs outgoing raid sim request as pretty JSON before calling backend |
 | `WOWSIMS_SIM_DEBUG` | — | `false` | When true (`1/true/yes/on`), sends `simOptions.debug=true` to backend sim |
 | `RUST_LOG` | — | `info` | Log level |
+
+If `DISCORD_GUILD_ID` is set, Discord command updates are usually visible almost immediately in that server. Leave it unset for production-style global registration.
 
 ## Using `wowsims/mop` Protobufs in Rust
 

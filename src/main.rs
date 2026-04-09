@@ -1,5 +1,6 @@
 mod commands;
 mod db;
+mod iss_telemetry;
 mod parsing;
 mod sim_runtime;
 mod sim_runtime_targets;
@@ -19,6 +20,29 @@ pub struct Data {
 
 /// Poise command context alias.
 pub type Context<'a> = poise::Context<'a, Data, anyhow::Error>;
+
+fn command_names(commands: &[poise::Command<Data, anyhow::Error>]) -> String {
+    commands
+        .iter()
+        .map(|command| format!("/{}", command.name))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn discord_guild_id() -> Result<Option<serenity::GuildId>> {
+    match std::env::var("DISCORD_GUILD_ID") {
+        Ok(raw_value) if !raw_value.trim().is_empty() => {
+            let guild_id = raw_value
+                .trim()
+                .parse::<u64>()
+                .map(serenity::GuildId::new)?;
+            Ok(Some(guild_id))
+        }
+        Ok(_) => Ok(None),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
 
 fn postgres_connect_options() -> PgConnectOptions {
     let postgres_user = std::env::var("POSTGRES_USER").unwrap_or_else(|_| "botuser".to_string());
@@ -64,7 +88,30 @@ async fn main() -> Result<()> {
                 commands::sim::sim(),
                 commands::status::status(),
                 commands::health::health(),
+                commands::piss::piss(),
             ],
+            pre_command: |ctx| {
+                Box::pin(async move {
+                    tracing::info!(
+                        command = ctx.command().name,
+                        user_id = %ctx.author().id,
+                        channel_id = %ctx.channel_id(),
+                        guild_id = ctx.guild_id().map(|guild_id| guild_id.get()),
+                        "Running command"
+                    );
+                })
+            },
+            post_command: |ctx| {
+                Box::pin(async move {
+                    tracing::info!(
+                        command = ctx.command().name,
+                        user_id = %ctx.author().id,
+                        channel_id = %ctx.channel_id(),
+                        guild_id = ctx.guild_id().map(|guild_id| guild_id.get()),
+                        "Finished command"
+                    );
+                })
+            },
             on_error: |err| {
                 Box::pin(async move {
                     tracing::error!("Command error: {:?}", err);
@@ -77,7 +124,31 @@ async fn main() -> Result<()> {
         })
         .setup(|ctx, _ready, framework| {
             Box::pin(async move {
-                poise::builtins::register_globally(ctx, &framework.options().commands).await?;
+                let registered_commands = command_names(&framework.options().commands);
+
+                if let Some(guild_id) = discord_guild_id()? {
+                    poise::builtins::register_in_guild(
+                        ctx,
+                        &framework.options().commands,
+                        guild_id,
+                    )
+                    .await?;
+                    tracing::info!(
+                        guild_id = guild_id.get(),
+                        commands = %registered_commands,
+                        command_count = framework.options().commands.len(),
+                        "Registered slash commands in guild"
+                    );
+                } else {
+                    poise::builtins::register_globally(ctx, &framework.options().commands)
+                        .await?;
+                    tracing::info!(
+                        commands = %registered_commands,
+                        command_count = framework.options().commands.len(),
+                        "Registered slash commands globally"
+                    );
+                }
+
                 tracing::info!("Bot is ready!");
                 Ok(Data {
                     db: pool,
