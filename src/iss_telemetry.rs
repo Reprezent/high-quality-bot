@@ -12,12 +12,18 @@ const URINE_TANK_ITEM: &str = "NODE3000005";
 const URINE_TANK_FIELD: &str = "Value";
 const URINE_PROCESSOR_ITEM: &str = "NODE3000004";
 const URINE_PROCESSOR_FIELD: &str = "Value";
+const WASTE_WATER_ITEM: &str = "NODE3000008";
+const WASTE_WATER_FIELD: &str = "Value";
+const CLEAN_WATER_ITEM: &str = "NODE3000009";
+const CLEAN_WATER_FIELD: &str = "Value";
 const SIGNAL_STATUS_ITEM: &str = "TIME_000001";
 const SIGNAL_STATUS_FIELD: &str = "Status.Class";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct IssUrineTelemetry {
     pub tank_percentage: f64,
+    pub waste_water_percentage: f64,
+    pub clean_water_percentage: f64,
     pub processor_status: String,
     pub signal_acquired: bool,
 }
@@ -31,14 +37,26 @@ pub async fn fetch_iss_urine_telemetry() -> Result<IssUrineTelemetry> {
     let tank_raw = fetch_lightstreamer_snapshot(&client, URINE_TANK_ITEM, URINE_TANK_FIELD).await?;
     let processor_raw =
         fetch_lightstreamer_snapshot(&client, URINE_PROCESSOR_ITEM, URINE_PROCESSOR_FIELD).await?;
+    let waste_water_raw =
+        fetch_lightstreamer_snapshot(&client, WASTE_WATER_ITEM, WASTE_WATER_FIELD).await?;
+    let clean_water_raw =
+        fetch_lightstreamer_snapshot(&client, CLEAN_WATER_ITEM, CLEAN_WATER_FIELD).await?;
     let signal_raw = fetch_lightstreamer_snapshot(&client, SIGNAL_STATUS_ITEM, SIGNAL_STATUS_FIELD).await?;
 
     let tank_percentage = tank_raw
         .parse::<f64>()
         .with_context(|| format!("invalid urine tank percentage: {tank_raw}"))?;
+    let waste_water_percentage = waste_water_raw
+        .parse::<f64>()
+        .with_context(|| format!("invalid waste water percentage: {waste_water_raw}"))?;
+    let clean_water_percentage = clean_water_raw
+        .parse::<f64>()
+        .with_context(|| format!("invalid clean water percentage: {clean_water_raw}"))?;
 
     Ok(IssUrineTelemetry {
         tank_percentage,
+        waste_water_percentage,
+        clean_water_percentage,
         processor_status: processor_status_label(&processor_raw),
         signal_acquired: signal_raw == SIGNAL_OK_STATUS_CLASS,
     })
