@@ -14,6 +14,10 @@ pub async fn create_pool(connect_options: PgConnectOptions) -> Result<PgPool> {
         .execute(&pool)
         .await?;
 
+    sqlx::raw_sql(include_str!("../migrations/002_iss_telemetry_history.sql"))
+        .execute(&pool)
+        .await?;
+
     Ok(pool)
 }
 
@@ -212,4 +216,71 @@ pub async fn get_latest_simulation_progress_frame(
         is_final: r.get("is_final"),
         created_at: r.get("created_at"),
     }))
+}
+
+// ---------------------------------------------------------------------------
+// ISS telemetry history
+// ---------------------------------------------------------------------------
+
+use crate::iss_telemetry::IssUrineTelemetry;
+
+pub struct IssTelemetrySample {
+    pub recorded_at: DateTime<Utc>,
+    pub urine_tank_pct: f64,
+    pub waste_water_pct: f64,
+    pub clean_water_pct: f64,
+    pub processor_status: String,
+}
+
+pub async fn insert_iss_telemetry(
+    pool: &PgPool,
+    telemetry: &IssUrineTelemetry,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO iss_telemetry_history (
+            urine_tank_pct, waste_water_pct, clean_water_pct,
+            processor_status, signal_acquired
+        )
+        VALUES ($1, $2, $3, $4, $5)
+        "#,
+    )
+    .bind(telemetry.tank_percentage)
+    .bind(telemetry.waste_water_percentage)
+    .bind(telemetry.clean_water_percentage)
+    .bind(&telemetry.processor_status)
+    .bind(telemetry.signal_acquired)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn get_iss_telemetry_history(
+    pool: &PgPool,
+    hours: i64,
+) -> Result<Vec<IssTelemetrySample>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT recorded_at, urine_tank_pct, waste_water_pct,
+               clean_water_pct, processor_status
+        FROM iss_telemetry_history
+        WHERE recorded_at >= NOW() - make_interval(hours => $1)
+        ORDER BY recorded_at ASC
+        "#,
+    )
+    .bind(hours as i32)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .iter()
+        .map(|r| IssTelemetrySample {
+            recorded_at: r.get("recorded_at"),
+            urine_tank_pct: r.get("urine_tank_pct"),
+            waste_water_pct: r.get("waste_water_pct"),
+            clean_water_pct: r.get("clean_water_pct"),
+            processor_status: r.get("processor_status"),
+        })
+        .collect())
 }

@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     protobuf-compiler \
     libprotobuf-dev \
+    libfontconfig1-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Cache dependencies by copying only manifest files first
@@ -35,6 +36,8 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libssl3 \
+    fontconfig \
+    fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the compiled binary and migrations
