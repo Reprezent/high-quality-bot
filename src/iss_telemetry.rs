@@ -64,7 +64,7 @@ pub async fn fetch_iss_urine_telemetry() -> Result<IssUrineTelemetry> {
 
 async fn fetch_lightstreamer_snapshot(client: &Client, item: &str, field: &str) -> Result<String> {
     let body = format!(
-        "LS_user=&LS_adapter_set={LIGHTSTREAMER_ADAPTER_SET}&LS_cid={LIGHTSTREAMER_CLIENT_ID}&LS_op=add&LS_subId=1&LS_group={item}&LS_schema={field}&LS_mode=MERGE&LS_snapshot=true&LS_polling=true&LS_polling_millis=1000"
+        "LS_user=&LS_adapter_set={LIGHTSTREAMER_ADAPTER_SET}&LS_cid={LIGHTSTREAMER_CLIENT_ID}&LS_op=add&LS_subId=1&LS_group={item}&LS_schema={field}&LS_mode=MERGE&LS_snapshot=true&LS_polling=true&LS_polling_millis=5000"
     );
 
     let response = client
@@ -84,8 +84,52 @@ async fn fetch_lightstreamer_snapshot(client: &Client, item: &str, field: &str) 
         .await
         .with_context(|| format!("failed to read Lightstreamer response for {item}/{field}"))?;
 
+    // If we got a LOOP directive without a U, line, the server wants us to
+    // rebind.  Extract the session ID and poll the bind endpoint once.
+    if !payload.lines().any(|l| l.starts_with("U,")) {
+        let session_id = parse_session_id(&payload)
+            .with_context(|| format!("no update and no session ID for {item}/{field}"))?;
+
+        let bind_url = format!(
+            "https://push.lightstreamer.com/lightstreamer/bind_session.txt?LS_protocol=TLCP-2.5.0"
+        );
+        let bind_body = format!(
+            "LS_session={session_id}&LS_polling=true&LS_polling_millis=5000"
+        );
+
+        let bind_resp = client
+            .post(&bind_url)
+            .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded; charset=utf-8")
+            .body(bind_body)
+            .send()
+            .await
+            .with_context(|| format!("failed to bind session for {item}/{field}"))?
+            .error_for_status()
+            .with_context(|| format!("bind session request failed for {item}/{field}"))?
+            .text()
+            .await
+            .with_context(|| format!("failed to read bind response for {item}/{field}"))?;
+
+        return parse_lightstreamer_update(&bind_resp)
+            .with_context(|| format!("failed to parse bind response for {item}/{field}"));
+    }
+
     parse_lightstreamer_update(&payload)
         .with_context(|| format!("failed to parse Lightstreamer response for {item}/{field}"))
+}
+
+fn parse_session_id(payload: &str) -> Result<String> {
+    let conok_line = payload
+        .lines()
+        .find(|line| line.starts_with("CONOK,"))
+        .ok_or_else(|| anyhow!("missing CONOK line"))?;
+
+    let parts: Vec<&str> = conok_line.split(',').collect();
+    if parts.len() < 2 {
+        bail!("malformed CONOK line: {conok_line}");
+    }
+
+    Ok(parts[1].to_string())
 }
 
 fn parse_lightstreamer_update(payload: &str) -> Result<String> {

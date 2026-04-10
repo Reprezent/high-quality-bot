@@ -1,6 +1,7 @@
 mod commands;
 mod db;
 mod iss_telemetry;
+mod iss_telemetry_tracker;
 mod parsing;
 mod sim_runtime;
 mod sim_runtime_targets;
@@ -82,6 +83,8 @@ async fn main() -> Result<()> {
     let sim_api_base_url =
         std::env::var("WOWSIMS_API_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:3333".to_string());
 
+    iss_telemetry_tracker::spawn(pool.clone());
+
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
             commands: vec![
@@ -89,6 +92,7 @@ async fn main() -> Result<()> {
                 commands::status::status(),
                 commands::health::health(),
                 commands::piss::piss(),
+                commands::pisshistory::pisshistory(),
             ],
             pre_command: |ctx| {
                 Box::pin(async move {
