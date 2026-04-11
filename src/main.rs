@@ -92,7 +92,7 @@ async fn main() -> Result<()> {
                 commands::status::status(),
                 commands::health::health(),
                 commands::piss::piss(),
-                commands::pisshistory::pisshistory(),
+                commands::pisstory::pisstory(),
             ],
             pre_command: |ctx| {
                 Box::pin(async move {
