@@ -28,3 +28,4 @@ prost-reflect = { version = "0.13", features = ["serde"] }
 
 [build-dependencies]
 prost-build = "0.12"
+time = { version = "0.3", features = ["formatting"] }
