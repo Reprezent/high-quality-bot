@@ -6,6 +6,7 @@ use poise::serenity_prelude::CreateAttachment;
 
 const IMG_WIDTH: u32 = 800;
 const IMG_HEIGHT: u32 = 400;
+const MAX_X_LABELS: usize = 8;
 
 fn render_chart(samples: &[IssTelemetrySample]) -> Result<Vec<u8>> {
     let mut buf = vec![0u8; (IMG_WIDTH * IMG_HEIGHT * 3) as usize];
@@ -20,7 +21,7 @@ fn render_chart(samples: &[IssTelemetrySample]) -> Result<Vec<u8>> {
         let t_max = samples.last().map(|s| s.recorded_at).unwrap_or_else(chrono::Utc::now);
 
         let time_range_mins = (t_max - t_min).num_minutes().max(1);
-        let x_label_count = (time_range_mins / 5).clamp(2, 20) as usize;
+        let x_label_count = (time_range_mins / 5).clamp(2, MAX_X_LABELS as i64) as usize;
 
         let mut chart = ChartBuilder::on(&root)
             .margin(10)
