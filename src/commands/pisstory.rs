@@ -113,8 +113,8 @@ fn encode_png(rgb: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
 }
 
 /// Show ISS water & waste telemetry history as a chart.
-#[poise::command(slash_command, rename = "pisshistory")]
-pub async fn pisshistory(
+#[poise::command(slash_command, rename = "pisstory")]
+pub async fn pisstory(
     ctx: Context<'_>,
     #[description = "Hours of history to show (default 24, max 168)"]
     #[min = 1]
