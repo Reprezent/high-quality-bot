@@ -1,7 +1,14 @@
 use std::env;
 use std::path::PathBuf;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 fn main() {
+    let build_timestamp = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .expect("failed to format build timestamp");
+    println!("cargo:rustc-env=BUILD_TIMESTAMP_UTC={build_timestamp}");
+
     println!("cargo:rerun-if-env-changed=MOP_PROTO_DIR");
 
     if env::var_os("CARGO_FEATURE_MOP_PROTO").is_none() {

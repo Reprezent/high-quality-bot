@@ -90,7 +90,7 @@ async fn main() -> Result<()> {
             commands: vec![
                 commands::sim::sim(),
                 commands::status::status(),
-                commands::health::health(),
+                commands::version::version(),
                 commands::piss::piss(),
                 commands::pisstory::pisstory(),
             ],
