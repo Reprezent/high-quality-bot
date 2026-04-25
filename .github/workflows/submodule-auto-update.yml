@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   update-submodule:
@@ -28,15 +29,29 @@ jobs:
           git checkout -B master origin/master
           git reset --hard origin/master
 
-      - name: Commit and push if changed
-        run: |
-          if git diff --quiet -- vendor/wowsims-mop .gitmodules; then
-            echo "No submodule updates available"
-            exit 0
-          fi
+      - name: Create pull request if changed
+        id: create-pull-request
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          add-paths: |
+            vendor/wowsims-mop
+            .gitmodules
+          commit-message: "chore: auto-update wowsims/mop submodule"
+          branch: chore/auto-update-wowsims-submodule
+          delete-branch: true
+          title: "chore: auto-update wowsims/mop submodule"
+          body: |
+            Automated submodule update for `vendor/wowsims-mop`.
 
-          git config user.name "github-actions[bot]"
-          git config user.email "richardalexriedel@yahoo.com"
-          git add vendor/wowsims-mop .gitmodules
-          git commit -m "chore: auto-update wowsims/mop submodule"
-          git push
+            This PR was created by the scheduled submodule update workflow.
+          labels: |
+            dependencies
+
+      - name: Enable auto-merge for PR
+        if: ${{ steps.create-pull-request.outputs.pull-request-number }}
+        uses: peter-evans/enable-pull-request-automerge@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          pull-request-number: ${{ steps.create-pull-request.outputs.pull-request-number }}
+          merge-method: squash
