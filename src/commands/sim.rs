@@ -1,5 +1,5 @@
-use crate::db;
 use crate::Context;
+use crate::db;
 use anyhow::Result;
 use serde_json::Value;
 
@@ -118,7 +118,8 @@ pub async fn sim(
     let gear_payload: serde_json::Value = match serde_json::from_str(&gear_json) {
         Ok(v) => v,
         Err(_) => {
-            ctx.say("❌ The gear payload is not valid JSON. Please check your input.").await?;
+            ctx.say("❌ The gear payload is not valid JSON. Please check your input.")
+                .await?;
             return Ok(());
         }
     };
@@ -143,7 +144,13 @@ pub async fn sim(
     let pool_for_task = pool.clone();
     let sim_api_base_url = ctx.data().sim_api_base_url.clone();
     tokio::spawn(async move {
-        if let Err(err) = crate::sim_runtime::run_async_simulation(pool_for_task.clone(), sim_api_base_url, run_id).await {
+        if let Err(err) = crate::sim_runtime::run_async_simulation(
+            pool_for_task.clone(),
+            sim_api_base_url,
+            run_id,
+        )
+        .await
+        {
             tracing::error!(run_id = %run_id, error = ?err, "async simulation failed");
             let _ = db::update_simulation_run_status(&pool_for_task, run_id, "failed").await;
         }
@@ -152,28 +159,34 @@ pub async fn sim(
             Ok(Some(run)) => {
                 let mention = format!("<@{}>", user_id_for_reply.get());
 
-                let progress_line = match db::get_latest_simulation_progress_frame(&pool_for_task, run_id).await {
-                    Ok(Some(frame)) if frame.total_iterations > 0 => {
-                        let dps = format_metric(frame.dps);
-                        let hps = format_metric(frame.hps);
-                        format!(
-                            "• Final Progress: **{}/{} iterations** ({:.1}%) | DPS {} | HPS {}",
-                            frame.completed_iterations,
-                            frame.total_iterations,
-                            (frame.completed_iterations as f64 / frame.total_iterations as f64) * 100.0,
-                            dps,
-                            hps,
-                        )
-                    }
-                    Ok(Some(frame)) => format!(
-                        "• Final Progress: frame #{}, sims {}/{}",
-                        frame.frame_index, frame.completed_sims, frame.total_sims
-                    ),
-                    Ok(None) => "• Final Progress: no frames recorded".to_string(),
-                    Err(_) => "• Final Progress: unavailable".to_string(),
-                };
+                let progress_line =
+                    match db::get_latest_simulation_progress_frame(&pool_for_task, run_id).await {
+                        Ok(Some(frame)) if frame.total_iterations > 0 => {
+                            let dps = format_metric(frame.dps);
+                            let hps = format_metric(frame.hps);
+                            format!(
+                                "• Final Progress: **{}/{} iterations** ({:.1}%) | DPS {} | HPS {}",
+                                frame.completed_iterations,
+                                frame.total_iterations,
+                                (frame.completed_iterations as f64 / frame.total_iterations as f64)
+                                    * 100.0,
+                                dps,
+                                hps,
+                            )
+                        }
+                        Ok(Some(frame)) => format!(
+                            "• Final Progress: frame #{}, sims {}/{}",
+                            frame.frame_index, frame.completed_sims, frame.total_sims
+                        ),
+                        Ok(None) => "• Final Progress: no frames recorded".to_string(),
+                        Err(_) => "• Final Progress: unavailable".to_string(),
+                    };
 
-                let status_emoji = if run.status == "complete" { "✅" } else { "❌" };
+                let status_emoji = if run.status == "complete" {
+                    "✅"
+                } else {
+                    "❌"
+                };
                 let status_label = if run.status == "complete" {
                     "Complete"
                 } else {

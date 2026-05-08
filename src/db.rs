@@ -1,6 +1,9 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row, postgres::{PgConnectOptions, PgPoolOptions}};
+use sqlx::{
+    PgPool, Row,
+    postgres::{PgConnectOptions, PgPoolOptions},
+};
 use uuid::Uuid;
 
 /// Establish a connection pool to PostgreSQL and run migrations.
@@ -66,10 +69,7 @@ pub async fn create_simulation_run(
 }
 
 /// Retrieve a simulation run by its ID.
-pub async fn get_simulation_run(
-    pool: &PgPool,
-    run_id: Uuid,
-) -> Result<Option<SimulationRun>> {
+pub async fn get_simulation_run(pool: &PgPool, run_id: Uuid) -> Result<Option<SimulationRun>> {
     let row = sqlx::query(
         r#"
         SELECT run_id, discord_user_id, class, spec,
@@ -95,11 +95,7 @@ pub async fn get_simulation_run(
     }))
 }
 
-pub async fn update_simulation_run_status(
-    pool: &PgPool,
-    run_id: Uuid,
-    status: &str,
-) -> Result<()> {
+pub async fn update_simulation_run_status(pool: &PgPool, run_id: Uuid, status: &str) -> Result<()> {
     sqlx::query(
         r#"
         UPDATE simulation_runs
@@ -232,10 +228,7 @@ pub struct IssTelemetrySample {
     pub processor_status: String,
 }
 
-pub async fn insert_iss_telemetry(
-    pool: &PgPool,
-    telemetry: &IssUrineTelemetry,
-) -> Result<()> {
+pub async fn insert_iss_telemetry(pool: &PgPool, telemetry: &IssUrineTelemetry) -> Result<()> {
     sqlx::query(
         r#"
         INSERT INTO iss_telemetry_history (

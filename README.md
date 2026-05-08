@@ -10,6 +10,7 @@ A Discord bot written in Rust that runs World of Warcraft simulations via slash 
 | `/class <class>[:<spec>]` | Save your default class (and optionally spec) to the database. |
 | `/status <run-id>` | Check the current status of a simulation run by its UUID. |
 | `/health` | Check if the bot can reach PostgreSQL and the wowsims async API. |
+| `/dailies` | Show when World of Warcraft US realm dailies reset next. |
 | `/piss` | Fetch the current ISS urine tank fill level from the public ISS telemetry stream. |
 
 ### Examples
@@ -20,6 +21,7 @@ A Discord bot written in Rust that runs World of Warcraft simulations via slash 
 /class paladin
 /status 550e8400-e29b-41d4-a716-446655440000
 /health
+/dailies
 /piss
 ```
 

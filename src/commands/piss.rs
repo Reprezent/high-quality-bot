@@ -8,7 +8,12 @@ fn status_bar(percentage: f64) -> String {
     let clamped = percentage.clamp(0.0, 100.0);
     let filled = ((clamped / 100.0) * BAR_WIDTH as f64).round() as usize;
     let empty = BAR_WIDTH - filled;
-    format!("[{}{}] {:.1}%", "█".repeat(filled), "░".repeat(empty), clamped)
+    format!(
+        "[{}{}] {:.1}%",
+        "█".repeat(filled),
+        "░".repeat(empty),
+        clamped
+    )
 }
 
 fn fill_status_label(percentage: f64) -> &'static str {

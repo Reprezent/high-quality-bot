@@ -9,13 +9,14 @@ use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
 use crate::db;
-use crate::parsing::build_player_from_run;
-use crate::sim_runtime_targets::{default_mop_encounter, default_mop_raid, default_mop_sim_options};
 use crate::mop_proto::mop::{
-    player, AplRotation, AsyncApiResult, Debuffs, PartyBuffs, ProgressMetrics, Raid, RaidBuffs,
-    RaidSimRequest, SimType,
+    AplRotation, AsyncApiResult, Debuffs, PartyBuffs, ProgressMetrics, Raid, RaidBuffs,
+    RaidSimRequest, SimType, player,
 };
-
+use crate::parsing::build_player_from_run;
+use crate::sim_runtime_targets::{
+    default_mop_encounter, default_mop_raid, default_mop_sim_options,
+};
 
 fn raid_player_count(raid: &Raid) -> usize {
     raid.parties
@@ -52,11 +53,7 @@ fn validate_sim_request_payload(request: &RaidSimRequest) -> Result<()> {
 }
 
 fn finite_or_nan(value: f64) -> f64 {
-    if value.is_finite() {
-        value
-    } else {
-        f64::NAN
-    }
+    if value.is_finite() { value } else { f64::NAN }
 }
 
 fn extract_raid_members(progress: &ProgressMetrics) -> Vec<String> {
@@ -183,22 +180,40 @@ fn extract_raid_buffs_payload(payload: &Value) -> Option<&Value> {
     payload
         .get("raidBuffs")
         .or_else(|| payload.get("raid_buffs"))
-        .or_else(|| payload.get("settings").and_then(|settings| settings.get("raidBuffs")))
-        .or_else(|| payload.get("settings").and_then(|settings| settings.get("raid_buffs")))
+        .or_else(|| {
+            payload
+                .get("settings")
+                .and_then(|settings| settings.get("raidBuffs"))
+        })
+        .or_else(|| {
+            payload
+                .get("settings")
+                .and_then(|settings| settings.get("raid_buffs"))
+        })
 }
 
 fn extract_debuffs_payload(payload: &Value) -> Option<&Value> {
-    payload
-        .get("debuffs")
-        .or_else(|| payload.get("settings").and_then(|settings| settings.get("debuffs")))
+    payload.get("debuffs").or_else(|| {
+        payload
+            .get("settings")
+            .and_then(|settings| settings.get("debuffs"))
+    })
 }
 
 fn extract_party_buffs_payload(payload: &Value) -> Option<&Value> {
     payload
         .get("partyBuffs")
         .or_else(|| payload.get("party_buffs"))
-        .or_else(|| payload.get("settings").and_then(|settings| settings.get("partyBuffs")))
-        .or_else(|| payload.get("settings").and_then(|settings| settings.get("party_buffs")))
+        .or_else(|| {
+            payload
+                .get("settings")
+                .and_then(|settings| settings.get("partyBuffs"))
+        })
+        .or_else(|| {
+            payload
+                .get("settings")
+                .and_then(|settings| settings.get("party_buffs"))
+        })
         .or_else(|| {
             payload
                 .get("raid")
@@ -363,8 +378,12 @@ fn maybe_log_request_json(run_id: Uuid, request: &RaidSimRequest) {
     }
 
     match serde_json::to_string_pretty(&request_to_json(request)) {
-        Ok(json) => tracing::info!(run_id = %run_id, request_json = %json, "sending raid sim request"),
-        Err(error) => tracing::warn!(run_id = %run_id, error = ?error, "failed to serialize raid sim request json"),
+        Ok(json) => {
+            tracing::info!(run_id = %run_id, request_json = %json, "sending raid sim request")
+        }
+        Err(error) => {
+            tracing::warn!(run_id = %run_id, error = ?error, "failed to serialize raid sim request json")
+        }
     }
 }
 
@@ -464,9 +483,12 @@ pub async fn run_async_simulation(
         return Err(anyhow!("raidSimAsync returned HTTP {}", response.status()));
     }
 
-    let start_body = response.bytes().await.context("failed to read /raidSimAsync response")?;
-    let async_result = AsyncApiResult::decode(start_body.as_ref())
-        .context("failed to decode AsyncApiResult")?;
+    let start_body = response
+        .bytes()
+        .await
+        .context("failed to read /raidSimAsync response")?;
+    let async_result =
+        AsyncApiResult::decode(start_body.as_ref()).context("failed to decode AsyncApiResult")?;
 
     let mut frame_index: i32 = 0;
     let mut idle_polls = 0;
@@ -497,7 +519,9 @@ pub async fn run_async_simulation(
 
                 if transient_poll_errors > 30 {
                     db::update_simulation_run_status(&pool, run_id, "failed").await?;
-                    return Err(anyhow!("failed to call /asyncProgress after repeated retries: {error}"));
+                    return Err(anyhow!(
+                        "failed to call /asyncProgress after repeated retries: {error}"
+                    ));
                 }
 
                 sleep(Duration::from_secs(1)).await;
@@ -540,7 +564,9 @@ pub async fn run_async_simulation(
 
                 if transient_poll_errors > 30 {
                     db::update_simulation_run_status(&pool, run_id, "failed").await?;
-                    return Err(anyhow!("failed to read /asyncProgress response after repeated retries: {error}"));
+                    return Err(anyhow!(
+                        "failed to read /asyncProgress response after repeated retries: {error}"
+                    ));
                 }
 
                 sleep(Duration::from_secs(1)).await;
@@ -562,7 +588,9 @@ pub async fn run_async_simulation(
 
                 if transient_poll_errors > 30 {
                     db::update_simulation_run_status(&pool, run_id, "failed").await?;
-                    return Err(anyhow!("failed to decode /asyncProgress response after repeated retries: {error}"));
+                    return Err(anyhow!(
+                        "failed to decode /asyncProgress response after repeated retries: {error}"
+                    ));
                 }
 
                 sleep(Duration::from_secs(1)).await;
@@ -570,9 +598,10 @@ pub async fn run_async_simulation(
             }
         };
 
-        let is_final = progress.final_raid_result.is_some() || progress.final_weight_result.is_some();
-        let iterations_done =
-            progress.total_iterations > 0 && progress.completed_iterations >= progress.total_iterations;
+        let is_final =
+            progress.final_raid_result.is_some() || progress.final_weight_result.is_some();
+        let iterations_done = progress.total_iterations > 0
+            && progress.completed_iterations >= progress.total_iterations;
         let sims_done = progress.total_sims > 0 && progress.completed_sims >= progress.total_sims;
         let appears_complete_without_final = !is_final && (iterations_done || sims_done);
 

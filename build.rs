@@ -28,8 +28,12 @@ fn main() {
         );
     }
 
-    let proto_dir = std::fs::canonicalize(&proto_dir)
-        .unwrap_or_else(|err| panic!("Unable to canonicalize proto dir {}: {err}", proto_dir.display()));
+    let proto_dir = std::fs::canonicalize(&proto_dir).unwrap_or_else(|err| {
+        panic!(
+            "Unable to canonicalize proto dir {}: {err}",
+            proto_dir.display()
+        )
+    });
 
     let api_proto = proto_dir.join("api.proto");
     if !api_proto.exists() {
