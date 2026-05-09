@@ -1,5 +1,5 @@
-use crate::db::{self, IssTelemetrySample};
 use crate::Context;
+use crate::db::{self, IssTelemetrySample};
 use anyhow::{Context as _, Result};
 use plotters::prelude::*;
 use poise::serenity_prelude::CreateAttachment;
@@ -17,8 +17,14 @@ fn render_chart(samples: &[IssTelemetrySample]) -> Result<Vec<u8>> {
         root.fill(&RGBColor(47, 49, 54))
             .context("failed to fill background")?;
 
-        let t_min = samples.first().map(|s| s.recorded_at).unwrap_or_else(chrono::Utc::now);
-        let t_max = samples.last().map(|s| s.recorded_at).unwrap_or_else(chrono::Utc::now);
+        let t_min = samples
+            .first()
+            .map(|s| s.recorded_at)
+            .unwrap_or_else(chrono::Utc::now);
+        let t_max = samples
+            .last()
+            .map(|s| s.recorded_at)
+            .unwrap_or_else(chrono::Utc::now);
 
         let time_range_mins = (t_max - t_min).num_minutes().max(1);
         let x_label_count = (time_range_mins / 5).clamp(2, MAX_X_LABELS as i64) as usize;
@@ -35,7 +41,9 @@ fn render_chart(samples: &[IssTelemetrySample]) -> Result<Vec<u8>> {
             .x_labels(x_label_count)
             .y_labels(11)
             .y_desc("Fill %")
-            .x_label_formatter(&|dt: &chrono::DateTime<chrono::Utc>| dt.format("%m/%d %H:%M").to_string())
+            .x_label_formatter(&|dt: &chrono::DateTime<chrono::Utc>| {
+                dt.format("%m/%d %H:%M").to_string()
+            })
             .y_label_formatter(&|v| format!("{v:.0}"))
             .axis_style(RGBColor(150, 150, 150))
             .label_style(("sans-serif", 14).into_font().color(&WHITE))
@@ -100,14 +108,8 @@ fn encode_png(rgb: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
     let mut png_bytes: Vec<u8> = Vec::new();
     {
         let encoder = image::codecs::png::PngEncoder::new(&mut png_bytes);
-        image::ImageEncoder::write_image(
-            encoder,
-            rgb,
-            width,
-            height,
-            image::ColorType::Rgb8,
-        )
-        .context("failed to encode PNG")?;
+        image::ImageEncoder::write_image(encoder, rgb, width, height, image::ColorType::Rgb8)
+            .context("failed to encode PNG")?;
     }
     Ok(png_bytes)
 }

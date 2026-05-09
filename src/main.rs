@@ -2,15 +2,15 @@ mod commands;
 mod db;
 mod iss_telemetry;
 mod iss_telemetry_tracker;
+pub mod mop_proto;
 mod parsing;
 mod sim_runtime;
 mod sim_runtime_targets;
-pub mod mop_proto;
 
 use anyhow::Result;
 use poise::serenity_prelude as serenity;
-use sqlx::postgres::PgConnectOptions;
 use sqlx::PgPool;
+use sqlx::postgres::PgConnectOptions;
 
 /// Shared application state available to every command handler.
 #[derive(Debug)]
@@ -76,18 +76,19 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let token = std::env::var("DISCORD_TOKEN")
-        .expect("DISCORD_TOKEN environment variable must be set");
+    let token =
+        std::env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN environment variable must be set");
 
     let pool = db::create_pool(postgres_connect_options()).await?;
-    let sim_api_base_url =
-        std::env::var("WOWSIMS_API_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:3333".to_string());
+    let sim_api_base_url = std::env::var("WOWSIMS_API_BASE_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:3333".to_string());
 
     iss_telemetry_tracker::spawn(pool.clone());
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
             commands: vec![
+                commands::dailies::dailies(),
                 commands::sim::sim(),
                 commands::status::status(),
                 commands::version::version(),
@@ -120,7 +121,9 @@ async fn main() -> Result<()> {
                 Box::pin(async move {
                     tracing::error!("Command error: {:?}", err);
                     if let poise::FrameworkError::Command { ctx, .. } = err {
-                        let _ = ctx.say("⚠️ An internal error occurred. Please try again later.").await;
+                        let _ = ctx
+                            .say("⚠️ An internal error occurred. Please try again later.")
+                            .await;
                     }
                 })
             },
@@ -144,8 +147,7 @@ async fn main() -> Result<()> {
                         "Registered slash commands in guild"
                     );
                 } else {
-                    poise::builtins::register_globally(ctx, &framework.options().commands)
-                        .await?;
+                    poise::builtins::register_globally(ctx, &framework.options().commands).await?;
                     tracing::info!(
                         commands = %registered_commands,
                         command_count = framework.options().commands.len(),
@@ -172,4 +174,3 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
-

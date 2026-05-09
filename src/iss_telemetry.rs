@@ -41,7 +41,8 @@ pub async fn fetch_iss_urine_telemetry() -> Result<IssUrineTelemetry> {
         fetch_lightstreamer_snapshot(&client, WASTE_WATER_ITEM, WASTE_WATER_FIELD).await?;
     let clean_water_raw =
         fetch_lightstreamer_snapshot(&client, CLEAN_WATER_ITEM, CLEAN_WATER_FIELD).await?;
-    let signal_raw = fetch_lightstreamer_snapshot(&client, SIGNAL_STATUS_ITEM, SIGNAL_STATUS_FIELD).await?;
+    let signal_raw =
+        fetch_lightstreamer_snapshot(&client, SIGNAL_STATUS_ITEM, SIGNAL_STATUS_FIELD).await?;
 
     let tank_percentage = tank_raw
         .parse::<f64>()
@@ -69,7 +70,10 @@ async fn fetch_lightstreamer_snapshot(client: &Client, item: &str, field: &str) 
 
     let response = client
         .post(LIGHTSTREAMER_CREATE_SESSION_URL)
-        .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded; charset=utf-8")
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded; charset=utf-8",
+        )
         .body(body)
         .send()
         .await
@@ -93,13 +97,14 @@ async fn fetch_lightstreamer_snapshot(client: &Client, item: &str, field: &str) 
         let bind_url = format!(
             "https://push.lightstreamer.com/lightstreamer/bind_session.txt?LS_protocol=TLCP-2.5.0"
         );
-        let bind_body = format!(
-            "LS_session={session_id}&LS_polling=true&LS_polling_millis=5000"
-        );
+        let bind_body = format!("LS_session={session_id}&LS_polling=true&LS_polling_millis=5000");
 
         let bind_resp = client
             .post(&bind_url)
-            .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded; charset=utf-8")
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded; charset=utf-8",
+            )
             .body(bind_body)
             .send()
             .await

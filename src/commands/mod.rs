@@ -1,3 +1,4 @@
+pub mod dailies;
 pub mod piss;
 pub mod pisstory;
 pub mod sim;
