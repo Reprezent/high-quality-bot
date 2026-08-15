@@ -247,6 +247,61 @@ fn apl_rotation_to_json(rotation: &AplRotation) -> Value {
     }
 }
 
+fn individual_buffs_to_json(buffs: &crate::mop_proto::mop::IndividualBuffs) -> Value {
+    serde_json::json!({
+        "innervateCount": buffs.innervate_count,
+        "hymnOfHopeCount": buffs.hymn_of_hope_count,
+        "unholyFrenzyCount": buffs.unholy_frenzy_count,
+        "tricksOfTheTrade": buffs.tricks_of_the_trade,
+        "devotionAuraCount": buffs.devotion_aura_count,
+        "painSuppressionCount": buffs.pain_suppression_count,
+        "vigilanceCount": buffs.vigilance_count,
+        "guardianSpiritCount": buffs.guardian_spirit_count,
+        "rallyingCryCount": buffs.rallying_cry_count,
+        "shatteringThrowCount": buffs.shattering_throw_count,
+    })
+}
+
+fn spec_options_present(spec: &Option<player::Spec>) -> bool {
+    match spec {
+        Some(player::Spec::BloodDeathKnight(value)) => value.options.is_some(),
+        Some(player::Spec::FrostDeathKnight(value)) => value.options.is_some(),
+        Some(player::Spec::UnholyDeathKnight(value)) => value.options.is_some(),
+        Some(player::Spec::BalanceDruid(value)) => value.options.is_some(),
+        Some(player::Spec::FeralDruid(value)) => value.options.is_some(),
+        Some(player::Spec::GuardianDruid(value)) => value.options.is_some(),
+        Some(player::Spec::RestorationDruid(value)) => value.options.is_some(),
+        Some(player::Spec::BeastMasteryHunter(value)) => value.options.is_some(),
+        Some(player::Spec::MarksmanshipHunter(value)) => value.options.is_some(),
+        Some(player::Spec::SurvivalHunter(value)) => value.options.is_some(),
+        Some(player::Spec::ArcaneMage(value)) => value.options.is_some(),
+        Some(player::Spec::FireMage(value)) => value.options.is_some(),
+        Some(player::Spec::FrostMage(value)) => value.options.is_some(),
+        Some(player::Spec::BrewmasterMonk(value)) => value.options.is_some(),
+        Some(player::Spec::MistweaverMonk(value)) => value.options.is_some(),
+        Some(player::Spec::WindwalkerMonk(value)) => value.options.is_some(),
+        Some(player::Spec::HolyPaladin(value)) => value.options.is_some(),
+        Some(player::Spec::ProtectionPaladin(value)) => value.options.is_some(),
+        Some(player::Spec::RetributionPaladin(value)) => value.options.is_some(),
+        Some(player::Spec::DisciplinePriest(value)) => value.options.is_some(),
+        Some(player::Spec::HolyPriest(value)) => value.options.is_some(),
+        Some(player::Spec::ShadowPriest(value)) => value.options.is_some(),
+        Some(player::Spec::AssassinationRogue(value)) => value.options.is_some(),
+        Some(player::Spec::CombatRogue(value)) => value.options.is_some(),
+        Some(player::Spec::SubtletyRogue(value)) => value.options.is_some(),
+        Some(player::Spec::ElementalShaman(value)) => value.options.is_some(),
+        Some(player::Spec::EnhancementShaman(value)) => value.options.is_some(),
+        Some(player::Spec::RestorationShaman(value)) => value.options.is_some(),
+        Some(player::Spec::AfflictionWarlock(value)) => value.options.is_some(),
+        Some(player::Spec::DemonologyWarlock(value)) => value.options.is_some(),
+        Some(player::Spec::DestructionWarlock(value)) => value.options.is_some(),
+        Some(player::Spec::ArmsWarrior(value)) => value.options.is_some(),
+        Some(player::Spec::FuryWarrior(value)) => value.options.is_some(),
+        Some(player::Spec::ProtectionWarrior(value)) => value.options.is_some(),
+        None => false,
+    }
+}
+
 fn request_to_json(request: &RaidSimRequest) -> Value {
     let raid = request.raid.as_ref();
     let encounter = request.encounter.as_ref();
@@ -293,10 +348,43 @@ fn request_to_json(request: &RaidSimRequest) -> Value {
                                 "name": player.name,
                                 "class": player.class,
                                 "race": player.race,
+                                "apiVersion": player.api_version,
                                 "talentsString": player.talents_string,
                                 "spec": player_spec_label(&player.spec),
+                                "specOptionsPresent": spec_options_present(&player.spec),
                                 "rotationPresent": player.rotation.is_some(),
                                 "rotationApl": player.rotation.as_ref().map(apl_rotation_to_json),
+                                "consumables": player.consumables.as_ref().map(|consumables| serde_json::json!({
+                                    "prepotId": consumables.prepot_id,
+                                    "potId": consumables.pot_id,
+                                    "flaskId": consumables.flask_id,
+                                    "battleElixirId": consumables.battle_elixir_id,
+                                    "guardianElixirId": consumables.guardian_elixir_id,
+                                    "foodId": consumables.food_id,
+                                    "explosiveId": consumables.explosive_id,
+                                    "conjuredId": consumables.conjured_id,
+                                })),
+                                "bonusStats": player.bonus_stats.as_ref().map(|stats| serde_json::json!({
+                                    "apiVersion": stats.api_version,
+                                    "stats": stats.stats,
+                                    "pseudoStats": stats.pseudo_stats,
+                                })),
+                                "enableItemSwap": player.enable_item_swap,
+                                "itemSwapPresent": player.item_swap.is_some(),
+                                "individualBuffs": player.buffs.as_ref().map(individual_buffs_to_json),
+                                "profession1": player.profession1,
+                                "profession2": player.profession2,
+                                "cooldowns": player.cooldowns.as_ref().map(|cooldowns| serde_json::json!({
+                                    "count": cooldowns.cooldowns.len(),
+                                    "hpPercentForDefensives": cooldowns.hp_percent_for_defensives,
+                                })),
+                                "reactionTimeMs": player.reaction_time_ms,
+                                "channelClipDelayMs": player.channel_clip_delay_ms,
+                                "inFrontOfTarget": player.in_front_of_target,
+                                "distanceFromTarget": player.distance_from_target,
+                                "darkIntentUptime": player.dark_intent_uptime,
+                                "challengeMode": player.challenge_mode,
+                                "healingModelPresent": player.healing_model.is_some(),
                                 "equipment": {
                                     "items": equipment_items,
                                 },

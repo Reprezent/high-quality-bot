@@ -1,8 +1,11 @@
 use anyhow::{Context, Result, anyhow};
+use prost::Message;
 use prost_reflect::{DescriptorPool, DynamicMessage};
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use crate::db;
 use crate::mop_proto::mop::{
@@ -11,7 +14,7 @@ use crate::mop_proto::mop::{
     DemonologyWarlock, DestructionWarlock, DisciplinePriest, DruidOptions, ElementalShaman,
     EnhancementShaman, EquipmentSpec, FeralDruid, FireMage, FrostDeathKnight, FrostMage,
     FuryWarrior, Glyphs, GuardianDruid, HolyPaladin, HolyPriest, HunterOptions, ItemLevelState,
-    ItemSpec, MageArmor, MageOptions, MarksmanshipHunter, MistweaverMonk, MonkOptions,
+    ItemSpec, ItemSwap, MageArmor, MageOptions, MarksmanshipHunter, MistweaverMonk, MonkOptions,
     PaladinOptions, Player, PriestOptions, ProtectionPaladin, ProtectionWarrior, Race,
     RestorationDruid, RestorationShaman, RetributionPaladin, RogueOptions, ShadowPriest,
     ShamanOptions, SubtletyRogue, SurvivalHunter, UnholyDeathKnight, WarlockOptions,
@@ -33,6 +36,151 @@ fn parse_i32(value: Option<&Value>) -> Option<i32> {
         .and_then(|value| i32::try_from(value).ok())
 }
 
+fn parse_item_level_state(value: Option<&Value>) -> Option<i32> {
+    value.and_then(|value| {
+        parse_i32(Some(value)).or_else(|| {
+            value
+                .as_str()
+                .and_then(ItemLevelState::from_str_name)
+                .map(|state| state as i32)
+        })
+    })
+}
+
+fn wowsims_db_json_candidates() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    if let Ok(value) = std::env::var("WOWSIMS_DB_JSON") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            paths.push(PathBuf::from(trimmed));
+        }
+    }
+
+    paths.push(PathBuf::from("vendor/wowsims-mop/assets/database/db.json"));
+    paths
+}
+
+fn load_item_scaling_states() -> Option<HashMap<i32, HashSet<i32>>> {
+    let db_path = wowsims_db_json_candidates()
+        .into_iter()
+        .find(|path| path.is_file())?;
+
+    let db_json = match fs::read_to_string(&db_path) {
+        Ok(db_json) => db_json,
+        Err(error) => {
+            tracing::warn!(
+                db_path = %db_path.display(),
+                error = ?error,
+                "failed to read WoWSims item database; item upgrades will not be normalized"
+            );
+            return None;
+        }
+    };
+
+    let db: Value = match serde_json::from_str(&db_json) {
+        Ok(db) => db,
+        Err(error) => {
+            tracing::warn!(
+                db_path = %db_path.display(),
+                error = ?error,
+                "failed to parse WoWSims item database; item upgrades will not be normalized"
+            );
+            return None;
+        }
+    };
+
+    let items = db.get("items").and_then(|items| items.as_array())?;
+    let mut states_by_item = HashMap::new();
+
+    for item in items {
+        let Some(item_id) = parse_i32(item.get("id")) else {
+            continue;
+        };
+        let Some(scaling_options) = item
+            .get("scalingOptions")
+            .and_then(|value| value.as_object())
+        else {
+            continue;
+        };
+
+        let states = scaling_options
+            .keys()
+            .filter_map(|state| state.parse::<i32>().ok())
+            .collect::<HashSet<i32>>();
+
+        states_by_item.insert(item_id, states);
+    }
+
+    Some(states_by_item)
+}
+
+fn item_scaling_states() -> Option<&'static HashMap<i32, HashSet<i32>>> {
+    static ITEM_SCALING_STATES: OnceLock<Option<HashMap<i32, HashSet<i32>>>> = OnceLock::new();
+
+    ITEM_SCALING_STATES
+        .get_or_init(load_item_scaling_states)
+        .as_ref()
+}
+
+fn normalize_item_upgrade_step(item_id: i32, upgrade_step: i32) -> i32 {
+    let Some(states_by_item) = item_scaling_states() else {
+        return upgrade_step;
+    };
+    let Some(states) = states_by_item.get(&item_id) else {
+        return upgrade_step;
+    };
+
+    if states.contains(&upgrade_step) {
+        return upgrade_step;
+    }
+
+    let fallback = states
+        .iter()
+        .copied()
+        .filter(|state| *state >= ItemLevelState::Base as i32 && *state <= upgrade_step)
+        .max()
+        .or_else(|| {
+            states
+                .contains(&(ItemLevelState::Base as i32))
+                .then_some(ItemLevelState::Base as i32)
+        })
+        .unwrap_or(ItemLevelState::Base as i32);
+
+    tracing::warn!(
+        item_id,
+        requested_upgrade_step = upgrade_step,
+        fallback_upgrade_step = fallback,
+        "item upgrade step is not supported by WoWSims database; using supported step"
+    );
+
+    fallback
+}
+
+fn normalize_item_spec(item: &mut ItemSpec) {
+    if item.id == 0 {
+        return;
+    }
+
+    item.upgrade_step = normalize_item_upgrade_step(item.id, item.upgrade_step);
+}
+
+fn normalize_equipment_spec(mut equipment: EquipmentSpec) -> EquipmentSpec {
+    for item in &mut equipment.items {
+        normalize_item_spec(item);
+    }
+
+    equipment
+}
+
+fn normalize_item_swap(mut item_swap: ItemSwap) -> ItemSwap {
+    for item in &mut item_swap.items {
+        normalize_item_spec(item);
+    }
+
+    item_swap
+}
+
 fn parse_item_spec(value: &Value) -> Option<ItemSpec> {
     let item = value.as_object()?;
     let id = parse_i32(item.get("id"))?;
@@ -48,7 +196,7 @@ fn parse_item_spec(value: &Value) -> Option<ItemSpec> {
         })
         .unwrap_or_default();
 
-    Some(ItemSpec {
+    let mut item_spec = ItemSpec {
         id,
         random_suffix: parse_i32(
             item.get("random_suffix")
@@ -58,15 +206,20 @@ fn parse_item_spec(value: &Value) -> Option<ItemSpec> {
         enchant: parse_i32(item.get("enchant")).unwrap_or(0),
         gems,
         reforging: parse_i32(item.get("reforging")).unwrap_or(0),
-        upgrade_step: parse_i32(item.get("upgrade_step").or_else(|| item.get("upgradeStep")))
-            .unwrap_or(ItemLevelState::Base as i32),
+        upgrade_step: parse_item_level_state(
+            item.get("upgrade_step").or_else(|| item.get("upgradeStep")),
+        )
+        .unwrap_or(ItemLevelState::Base as i32),
         challenge_mode: item
             .get("challenge_mode")
             .or_else(|| item.get("challengeMode"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
         tinker: parse_i32(item.get("tinker")).unwrap_or(0),
-    })
+    };
+
+    normalize_item_spec(&mut item_spec);
+    Some(item_spec)
 }
 
 fn parse_equipment_spec(gear_payload: &Value) -> EquipmentSpec {
@@ -150,7 +303,7 @@ fn parse_equipment_spec(gear_payload: &Value) -> EquipmentSpec {
         Vec::new()
     };
 
-    EquipmentSpec { items }
+    normalize_equipment_spec(EquipmentSpec { items })
 }
 
 fn parse_talents_string(payload: &Value) -> String {
@@ -297,21 +450,38 @@ fn select_vendor_apl_file(apl_dir: &Path, spec_folder: &str) -> Result<PathBuf> 
     Ok(apl_files[0].clone())
 }
 
-fn parse_apl_rotation_protojson(apl_protojson: &str) -> Result<AplRotation> {
+fn parse_protojson_message<T>(message_name: &str, protojson: &str) -> Result<T>
+where
+    T: Message + Default,
+{
     let pool = DescriptorPool::decode(crate::mop_proto::mop::DESCRIPTOR_SET_BYTES)
         .context("failed to decode protobuf descriptor set")?;
 
     let descriptor = pool
-        .get_message_by_name("proto.APLRotation")
-        .ok_or_else(|| anyhow!("APLRotation descriptor not found in descriptor set"))?;
+        .get_message_by_name(message_name)
+        .ok_or_else(|| anyhow!("{message_name} descriptor not found in descriptor set"))?;
 
-    let mut deserializer = serde_json::Deserializer::from_str(apl_protojson);
+    let mut deserializer = serde_json::Deserializer::from_str(protojson);
     let dynamic = DynamicMessage::deserialize(descriptor, &mut deserializer)
-        .context("failed to decode APL protojson")?;
+        .with_context(|| format!("failed to decode {message_name} protojson"))?;
 
     dynamic
-        .transcode_to::<AplRotation>()
-        .context("failed to transcode dynamic APL message into AplRotation")
+        .transcode_to::<T>()
+        .with_context(|| format!("failed to transcode dynamic {message_name} message"))
+}
+
+fn parse_protojson_value<T>(message_name: &str, value: &Value) -> Result<T>
+where
+    T: Message + Default,
+{
+    let protojson = serde_json::to_string(value)
+        .with_context(|| format!("failed to serialize {message_name} payload as JSON"))?;
+
+    parse_protojson_message(message_name, &protojson)
+}
+
+fn parse_apl_rotation_protojson(apl_protojson: &str) -> Result<AplRotation> {
+    parse_protojson_message("proto.APLRotation", apl_protojson)
 }
 
 fn extract_rotation_from_payload(payload: &Value) -> Option<&Value> {
@@ -339,6 +509,55 @@ fn load_rotation_from_payload(payload: &Value) -> Result<Option<AplRotation>> {
         .context("failed to serialize payload rotation as JSON")?;
 
     parse_apl_rotation_protojson(&rotation_json).map(Some)
+}
+
+fn extract_full_player_payloads(payload: &Value) -> Vec<&Value> {
+    let mut candidates = Vec::new();
+
+    if let Some(player) = payload.get("player") {
+        candidates.push(player);
+    }
+
+    if let Some(player) = payload
+        .get("settings")
+        .and_then(|settings| settings.get("player"))
+    {
+        candidates.push(player);
+    }
+
+    if let Some(player) = payload
+        .get("raid")
+        .and_then(|raid| raid.get("parties"))
+        .and_then(|parties| parties.as_array())
+        .and_then(|parties| parties.first())
+        .and_then(|party| party.get("players"))
+        .and_then(|players| players.as_array())
+        .and_then(|players| players.first())
+    {
+        candidates.push(player);
+    }
+
+    if payload.get("class").is_some() && payload.get("player").is_none() {
+        candidates.push(payload);
+    }
+
+    candidates
+}
+
+fn load_full_player_from_payload(payload: &Value) -> Option<Player> {
+    for player_payload in extract_full_player_payloads(payload) {
+        match parse_protojson_value::<Player>("proto.Player", player_payload) {
+            Ok(player) => return Some(player),
+            Err(error) => {
+                tracing::debug!(
+                    error = ?error,
+                    "failed to parse payload candidate as full WoWSims player"
+                );
+            }
+        }
+    }
+
+    None
 }
 
 fn load_vendor_default_rotation(class: &str, spec: &str) -> Result<AplRotation> {
@@ -1155,9 +1374,7 @@ fn with_spec_specific_defaults(spec: player::Spec) -> player::Spec {
 pub fn build_player_from_run(run: &db::SimulationRun) -> Result<Player> {
     let class = run.class.trim().to_lowercase();
     let spec = run.spec.trim().to_lowercase();
-    let (class_id, race_id, spec_oneof) = resolve_player_spec(&class, &spec)?;
-    let spec_oneof = with_default_spec_options(spec_oneof);
-    let spec_oneof = with_spec_specific_defaults(spec_oneof);
+    let (class_id, fallback_race_id, expected_spec_oneof) = resolve_player_spec(&class, &spec)?;
 
     let player_name = if run.discord_user_id.is_empty() {
         format!("{}/{}", class, spec)
@@ -1179,16 +1396,190 @@ pub fn build_player_from_run(run: &db::SimulationRun) -> Result<Player> {
         }
     };
 
+    let build_spec = |spec_oneof: player::Spec| {
+        with_spec_specific_defaults(with_default_spec_options(spec_oneof))
+    };
+
+    if let Some(mut player) = load_full_player_from_payload(&run.gear_payload) {
+        let spec_oneof = match player.spec.take() {
+            Some(spec_oneof)
+                if std::mem::discriminant(&spec_oneof)
+                    == std::mem::discriminant(&expected_spec_oneof) =>
+            {
+                spec_oneof
+            }
+            _ => expected_spec_oneof,
+        };
+
+        player.api_version = PLAYER_API_VERSION;
+        player.class = class_id;
+        if player.race == Race::Unknown as i32 {
+            player.race = fallback_race_id;
+        }
+        if player.name.trim().is_empty() {
+            player.name = player_name;
+        }
+        if player.equipment.is_none() {
+            player.equipment = Some(parse_equipment_spec(&run.gear_payload));
+        } else if let Some(equipment) = player.equipment.take() {
+            player.equipment = Some(normalize_equipment_spec(equipment));
+        }
+        if player.glyphs.is_none() {
+            player.glyphs = Some(parse_glyphs(&run.gear_payload));
+        }
+        if let Some(item_swap) = player.item_swap.take() {
+            player.item_swap = Some(normalize_item_swap(item_swap));
+        }
+        if player.talents_string.trim().is_empty() {
+            player.talents_string = parse_talents_string(&run.gear_payload);
+        }
+        if player.rotation.is_none() {
+            player.rotation = rotation;
+        }
+        player.spec = Some(build_spec(spec_oneof));
+
+        return Ok(player);
+    }
+
     Ok(Player {
         api_version: PLAYER_API_VERSION,
         name: player_name,
-        race: race_id,
+        race: fallback_race_id,
         class: class_id,
         equipment: Some(parse_equipment_spec(&run.gear_payload)),
         glyphs: Some(parse_glyphs(&run.gear_payload)),
         talents_string: parse_talents_string(&run.gear_payload),
         rotation,
-        spec: Some(spec_oneof),
+        spec: Some(build_spec(expected_spec_oneof)),
         ..Default::default()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mop_proto::mop::Profession;
+    use chrono::Utc;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    fn simulation_run(payload: Value) -> db::SimulationRun {
+        let now = Utc::now();
+
+        db::SimulationRun {
+            run_id: Uuid::new_v4(),
+            discord_user_id: "test-user".to_string(),
+            class: "mage".to_string(),
+            spec: "arcane".to_string(),
+            gear_payload: payload,
+            raid_members: Vec::new(),
+            status: "pending".to_string(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn build_player_preserves_full_player_settings() {
+        let run = simulation_run(json!({
+            "player": {
+                "class": "ClassMage",
+                "race": "RaceTroll",
+                "name": "arcane-local",
+                "equipment": { "items": [{ "id": 12345, "enchant": 54321 }] },
+                "glyphs": { "major1": 1, "major2": 2, "major3": 3 },
+                "talentsString": "123123",
+                "arcaneMage": {
+                    "options": {
+                        "classOptions": { "defaultMageArmor": "MageArmorFrostArmor" }
+                    }
+                },
+                "rotation": { "type": "TypeAuto" },
+                "consumables": {
+                    "flaskId": 76085,
+                    "foodId": 74650,
+                    "potId": 76093,
+                    "prepotId": 76093
+                },
+                "profession1": "Engineering",
+                "profession2": "Tailoring",
+                "reactionTimeMs": 50,
+                "channelClipDelayMs": 25,
+                "distanceFromTarget": 20.0,
+                "challengeMode": true
+            }
+        }));
+
+        let player = build_player_from_run(&run).unwrap();
+
+        assert_eq!(player.class, Class::Mage as i32);
+        assert_eq!(player.race, Race::Troll as i32);
+        assert_eq!(player.name, "arcane-local");
+        assert_eq!(player.profession1, Profession::Engineering as i32);
+        assert_eq!(player.profession2, Profession::Tailoring as i32);
+        assert_eq!(player.distance_from_target, 20.0);
+        assert_eq!(player.reaction_time_ms, 50);
+        assert_eq!(player.channel_clip_delay_ms, 25);
+        assert!(player.challenge_mode);
+        assert_eq!(player.consumables.as_ref().unwrap().flask_id, 76085);
+        assert_eq!(player.equipment.as_ref().unwrap().items[0].id, 12345);
+        assert_eq!(player.talents_string, "123123");
+        assert!(player.rotation.is_some());
+
+        match player.spec.unwrap() {
+            player::Spec::ArcaneMage(value) => {
+                let class_options = value.options.unwrap().class_options.unwrap();
+                assert_eq!(
+                    class_options.default_mage_armor,
+                    MageArmor::FrostArmor as i32
+                );
+            }
+            _ => panic!("expected arcane mage spec"),
+        }
+    }
+
+    #[test]
+    fn build_player_keeps_minimal_payload_fallback() {
+        let run = simulation_run(json!({
+            "class": "mage",
+            "spec": "arcane",
+            "items": [{ "id": 12345 }],
+            "talents": "111111",
+            "glyphs": {
+                "major": [1, 2, 3],
+                "minor": [4, 5, 6]
+            },
+            "rotation": { "type": "TypeAuto" }
+        }));
+
+        let player = build_player_from_run(&run).unwrap();
+
+        assert_eq!(player.class, Class::Mage as i32);
+        assert_eq!(player.race, Race::Human as i32);
+        assert_eq!(player.equipment.as_ref().unwrap().items[0].id, 12345);
+        assert_eq!(player.glyphs.as_ref().unwrap().major1, 1);
+        assert_eq!(player.talents_string, "111111");
+        assert!(player.rotation.is_some());
+    }
+
+    #[test]
+    fn build_player_clamps_unsupported_upgrade_steps() {
+        let run = simulation_run(json!({
+            "class": "mage",
+            "spec": "arcane",
+            "items": [
+                { "id": 95261, "upgradeStep": 2 },
+                { "id": 94524, "upgradeStep": 2 }
+            ],
+            "rotation": { "type": "TypeAuto" }
+        }));
+
+        let player = build_player_from_run(&run).unwrap();
+        let items = &player.equipment.as_ref().unwrap().items;
+
+        assert_eq!(items[0].id, 95261);
+        assert_eq!(items[0].upgrade_step, ItemLevelState::Base as i32);
+        assert_eq!(items[1].id, 94524);
+        assert_eq!(items[1].upgrade_step, ItemLevelState::UpgradeStepTwo as i32);
+    }
 }
