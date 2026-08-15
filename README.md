@@ -12,6 +12,9 @@ A Discord bot written in Rust that runs World of Warcraft simulations via slash 
 | `/health` | Check if the bot can reach PostgreSQL and the wowsims async API. |
 | `/dailies` | Show when World of Warcraft US realm dailies reset next. |
 | `/piss` | Fetch the current ISS urine tank fill level from the public ISS telemetry stream. |
+| `/warcraftlogs track <guild> <server> <region> <channel>` | Post new public reports and boss kills for a Warcraft Logs guild. Requires Manage Server. |
+| `/warcraftlogs status` | Show this server's Warcraft Logs tracker status. |
+| `/warcraftlogs untrack` | Stop tracking Warcraft Logs in this server. Requires Manage Server. |
 
 ### Examples
 
@@ -23,6 +26,8 @@ A Discord bot written in Rust that runs World of Warcraft simulations via slash 
 /health
 /dailies
 /piss
+/warcraftlogs track "Example Guild" area-52 US #raid-logs
+/warcraftlogs status
 ```
 
 ## Prerequisites
@@ -30,6 +35,7 @@ A Discord bot written in Rust that runs World of Warcraft simulations via slash 
 - [Rust](https://rustup.rs/) 1.70+
 - [Docker](https://docs.docker.com/get-docker/) & [Docker Compose](https://docs.docker.com/compose/)
 - A Discord bot token from the [Discord Developer Portal](https://discord.com/developers/applications)
+- A Warcraft Logs API v2 client from the [Warcraft Logs client management page](https://www.warcraftlogs.com/api/clients/) to enable log tracking
 
 ## Local Development
 
@@ -78,11 +84,38 @@ This starts:
 | `POSTGRES_HOST` | — | `localhost` (local) / `db` (docker-compose) | DB host used by bot |
 | `POSTGRES_PORT` | — | `5432` | DB port used by bot |
 | `WOWSIMS_API_BASE_URL` | — | `http://127.0.0.1:3333` (local) / `http://sim:3333` (docker-compose) | Base URL for wowsims async sim API (`/raidSimAsync`, `/asyncProgress`) |
+| `WARCRAFT_LOGS_CLIENT_ID` | — | empty | Warcraft Logs API v2 client ID. Set with `WARCRAFT_LOGS_CLIENT_SECRET` to enable tracking. |
+| `WARCRAFT_LOGS_CLIENT_SECRET` | — | empty | Warcraft Logs API v2 client secret. Never expose this in Discord or commit it. |
+| `WARCRAFT_LOGS_POLL_INTERVAL_SECS` | — | `60` | Base report/fight polling interval; values below 30 seconds are clamped to 30. |
 | `LOG_SIM_REQUEST_JSON` | — | `false` | When true (`1/true/yes/on`), logs outgoing raid sim request as pretty JSON before calling backend |
 | `WOWSIMS_SIM_DEBUG` | — | `false` | When true (`1/true/yes/on`), sends `simOptions.debug=true` to backend sim |
 | `RUST_LOG` | — | `info` | Log level |
 
 If `DISCORD_GUILD_ID` is set, Discord command updates are usually visible almost immediately in that server. Leave it unset for production-style global registration.
+
+## Warcraft Logs Tracking
+
+1. Create a Warcraft Logs API v2 client at <https://www.warcraftlogs.com/api/clients/>.
+2. Set both `WARCRAFT_LOGS_CLIENT_ID` and `WARCRAFT_LOGS_CLIENT_SECRET`, then restart the bot.
+3. Give the bot **View Channel**, **Send Messages**, and **Embed Links** permissions in the destination channel.
+4. As a member with **Manage Server**, run:
+
+   ```text
+   /warcraftlogs track guild:"Example Guild" server:"Area 52" region:US channel:#raid-logs
+   ```
+
+The command validates the guild and channel before replacing this Discord server's existing tracker. It records the current public reports and completed kills as a baseline, so enabling tracking does not post historical announcements. Afterward the bot:
+
+- Polls Warcraft Logs because its API does not provide custom report webhooks or GraphQL subscriptions.
+- Posts a link when it discovers a new public report.
+- Tracks active/revised reports and posts one congratulations embed per completed encounter kill.
+- Includes difficulty, kill time, duration, raid size, average item level, top damage and healing, deaths, and a fight-specific report link when those metrics are available.
+- Uses durable cursors and overlapping discovery windows to avoid gaps, plus database uniqueness, confirmation retries, and Discord nonces to minimize duplicate announcements across retries or restarts.
+- Slows polling automatically when Warcraft Logs hourly API points are low.
+
+The initial integration uses bot-level client credentials and intentionally supports **public guild reports only**. Private/unlisted reports and per-user Warcraft Logs OAuth are not supported. Warcraft Logs documents report-table JSON as non-frozen; if a summary payload changes, the bot records and retries the failed summary instead of posting invented metrics.
+
+Use `/warcraftlogs status` to see the destination and latest polling health. Use `/warcraftlogs untrack` to remove the tracker and its stored report/fight state.
 
 ## Using `wowsims/mop` Protobufs in Rust
 
@@ -166,10 +199,13 @@ The official GitHub Actions workflow (`.github/workflows/docker.yml`) automatica
 
 ## Database Schema
 
-The bot automatically applies `migrations/001_initial.sql` on startup:
+The bot automatically applies its SQL migrations on startup:
 
 - **`user_preferences`** — stores each user's default class/spec keyed by Discord user ID
 - **`simulation_runs`** — records every simulation run with its status, gear payload, and timestamps
+- **`warcraft_logs_subscriptions`** — stores one tracked Warcraft Logs guild and destination per Discord server
+- **`warcraft_logs_reports`** — stores report discovery, revision, baseline, and announcement state
+- **`warcraft_logs_fights`** — stores report-local boss fights and idempotent announcement state
 
 ## Project Structure
 
@@ -177,13 +213,19 @@ The bot automatically applies `migrations/001_initial.sql` on startup:
 ├── src/
 │   ├── main.rs              # Bot entry point, framework setup
 │   ├── db.rs                # Database helpers (PostgreSQL via sqlx)
+│   ├── warcraft_logs.rs     # OAuth and Warcraft Logs GraphQL API client
+│   ├── warcraft_logs_discord.rs # Report/kill links and Discord embeds
+│   ├── warcraft_logs_tracker.rs # Polling and announcement worker
 │   └── commands/
 │       ├── mod.rs
 │       ├── sim.rs           # /sim command
 │       ├── class.rs         # /class command
-│       └── status.rs        # /status command
+│       ├── status.rs        # /status command
+│       └── warcraftlogs.rs  # /warcraftlogs command group
 ├── migrations/
-│   └── 001_initial.sql      # Schema migrations
+│   ├── 001_initial.sql      # Simulation schema
+│   ├── 002_iss_telemetry_history.sql
+│   └── 003_warcraft_logs.sql
 ├── Dockerfile               # Multi-stage Docker build
 ├── docker-compose.yml       # Bot + PostgreSQL stack
 └── .github/workflows/

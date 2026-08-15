@@ -4,3 +4,4 @@ pub mod pisstory;
 pub mod sim;
 pub mod status;
 pub mod version;
+pub mod warcraftlogs;
