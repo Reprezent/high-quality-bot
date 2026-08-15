@@ -8,7 +8,6 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::RwLock;
-use tracing::debug;
 
 const TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(30);
 const REPORT_PAGE_LIMIT: i32 = 100;
@@ -284,9 +283,11 @@ impl WarcraftLogsClient {
             .build()
             .context("failed to build Warcraft Logs HTTP client")?;
 
-        debug!(
+        tracing::debug!(
             "Warcraft Logs client configured with client_id={:?}, oauth_url_override={:?}, graphql_url_override={:?}",
-            config.client_id, oauth_url_override, graphql_url_override
+            config.client_id,
+            oauth_url_override,
+            graphql_url_override
         );
 
         Ok(Self {
@@ -308,7 +309,7 @@ impl WarcraftLogsClient {
         server_slug: &str,
         region: &str,
     ) -> Result<Option<WarcraftLogsGuild>> {
-        debug!("Attempting to lookup guild {name} on {server_slug}.{region} at {site:?}");
+        tracing::debug!("Attempting to lookup guild {name} on {server_slug}.{region} at {site:?}");
         let data: GuildLookupData = self
             .graphql(
                 site,
@@ -321,7 +322,7 @@ impl WarcraftLogsClient {
             )
             .await?;
 
-        debug!("Got guild {:?} from Warcraft Logs", data.guild_data.guild);
+        tracing::debug!("Got guild {:?} from Warcraft Logs", data.guild_data.guild);
         Ok(data.guild_data.guild)
     }
 
@@ -330,12 +331,12 @@ impl WarcraftLogsClient {
         site: WarcraftLogsSite,
         guild_id: i64,
     ) -> Result<Option<WarcraftLogsGuild>> {
-        debug!("Attempting to lookup guild with id {guild_id} at {site:?}");
+        tracing::debug!("Attempting to lookup guild with id {guild_id} at {site:?}");
         let data: GuildLookupData = self
             .graphql(site, GUILD_BY_ID_QUERY, GuildByIdVariables { id: guild_id })
             .await?;
 
-        debug!("Got guild {:?} from Warcraft Logs", data.guild_data.guild);
+        tracing::debug!("Got guild {:?} from Warcraft Logs", data.guild_data.guild);
         Ok(data.guild_data.guild)
     }
 
@@ -350,7 +351,7 @@ impl WarcraftLogsClient {
         let mut reports = Vec::new();
 
         let rate_limit = loop {
-            debug!(
+            tracing::debug!(
                 "Attempting to fetch reports for guild {guild_id} at {site:?}, page {page}. Time window: {start_time_ms} to {end_time_ms}"
             );
             let data: GuildReportsData = self
@@ -366,7 +367,7 @@ impl WarcraftLogsClient {
                     },
                 )
                 .await?;
-            debug!("Done fetching reports for guild {guild_id} at {site:?}.");
+            tracing::debug!("Done fetching reports for guild {guild_id} at {site:?}.");
             let report_page = data.report_data.reports;
             reports.extend(report_page.data);
 

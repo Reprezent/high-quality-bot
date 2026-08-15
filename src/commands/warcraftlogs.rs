@@ -90,7 +90,7 @@ pub async fn track(
         WarcraftLogsSection,
     >,
 ) -> Result<()> {
-    ctx.defer_ephemeral().await?;
+    ctx.defer().await?;
 
     let Some(discord_guild_id) = ctx.guild_id() else {
         tracing::warn!(
@@ -375,7 +375,7 @@ pub async fn track(
 /// Stop Warcraft Logs tracking in this Discord server.
 #[poise::command(slash_command, guild_only, required_permissions = "MANAGE_GUILD")]
 pub async fn untrack(ctx: Context<'_>) -> Result<()> {
-    ctx.defer_ephemeral().await?;
+    ctx.defer().await?;
     let Some(guild_id) = ctx.guild_id() else {
         ctx.say("This command can only be used in a Discord server.")
             .await?;
@@ -396,7 +396,7 @@ pub async fn untrack(ctx: Context<'_>) -> Result<()> {
 /// Show Warcraft Logs tracking status for this Discord server.
 #[poise::command(slash_command, guild_only)]
 pub async fn status(ctx: Context<'_>) -> Result<()> {
-    ctx.defer_ephemeral().await?;
+    ctx.defer().await?;
     let Some(guild_id) = ctx.guild_id() else {
         ctx.say("This command can only be used in a Discord server.")
             .await?;
@@ -445,7 +445,7 @@ pub async fn status(ctx: Context<'_>) -> Result<()> {
 /// Show the tracked guild's three most recent public reports.
 #[poise::command(slash_command, guild_only)]
 pub async fn history(ctx: Context<'_>) -> Result<()> {
-    ctx.defer_ephemeral().await?;
+    ctx.defer().await?;
     let Some(client) = ctx.data().wcl_client.as_ref() else {
         ctx.say(
             "Warcraft Logs tracking is not configured. Set the bot's \
@@ -510,7 +510,7 @@ pub async fn summary(
     ctx: Context<'_>,
     #[description = "Classic or Retail Warcraft Logs report URL"] report_link: String,
 ) -> Result<()> {
-    ctx.defer_ephemeral().await?;
+    ctx.defer().await?;
     let Some(client) = ctx.data().wcl_client.as_ref() else {
         ctx.say(
             "Warcraft Logs is not configured. Set the bot's `WARCRAFT_LOGS_CLIENT_ID` and \
@@ -603,8 +603,7 @@ pub async fn summary(
     };
     ctx.send(
         poise::CreateReply::default()
-            .embed(warcraft_logs_discord::kill_embed(&preview, &kill_summary))
-            .ephemeral(true),
+            .embed(warcraft_logs_discord::kill_embed(&preview, &kill_summary)),
     )
     .await?;
     tracing::info!(

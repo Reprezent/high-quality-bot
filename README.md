@@ -156,6 +156,8 @@ The command accepts guild pages from `classic.warcraftlogs.com` and `www.warcraf
 - Uses durable cursors and overlapping discovery windows to avoid gaps, plus database uniqueness, confirmation retries, and Discord nonces to minimize duplicate announcements across retries or restarts.
 - Slows polling automatically when Warcraft Logs hourly API points are low.
 
+Warcraft Logs slash-command responses are public channel messages so other members can see tracker status, report history, and summary previews.
+
 The integration uses bot-level client credentials and intentionally supports **public guild reports only** on the Classic and Retail Warcraft Logs sections. Private/unlisted reports and per-user Warcraft Logs OAuth are not supported. Warcraft Logs documents report-table JSON as non-frozen; if a summary payload changes, the bot records and retries the failed summary instead of posting invented metrics.
 
 Use `/warcraftlogs status` to see the destination and latest polling health. Use `/warcraftlogs history` to query Warcraft Logs for the tracked guild's three newest public reports, including reports older than the local tracking baseline. Use `/warcraftlogs summary` with any public Classic or Retail report link to preview the same boss-kill embed the tracker posts; a numeric `fight` selector chooses that completed kill, while a plain report link or `fight=last` uses the latest completed kill. Use `/warcraftlogs untrack` to remove the tracker and its stored report/fight state.
