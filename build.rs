@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-const MOP_UPSTREAM_REVISION: &str = "325d83c7bb0b2890795bdd21146d60988bb8869c";
+const MOP_UPSTREAM_REVISION: &str = "00b8d1968b54240c62b2546013008d66949764e5";
 
 fn main() {
     let build_timestamp = OffsetDateTime::now_utc()
