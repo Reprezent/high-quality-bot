@@ -148,6 +148,33 @@ pub async fn update_simulation_run_status(pool: &PgPool, run_id: Uuid, status: &
     Ok(())
 }
 
+pub async fn update_simulation_run_request(
+    pool: &PgPool,
+    run_id: Uuid,
+    normalized_request: &serde_json::Value,
+    effective_random_seed: i64,
+    effective_iterations: i32,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE simulation_runs
+        SET normalized_request = $2,
+            effective_random_seed = $3,
+            effective_iterations = $4,
+            updated_at = NOW()
+        WHERE run_id = $1
+        "#,
+    )
+    .bind(run_id)
+    .bind(normalized_request)
+    .bind(effective_random_seed)
+    .bind(effective_iterations)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 pub async fn update_simulation_run_raid_members(
     pool: &PgPool,
     run_id: Uuid,

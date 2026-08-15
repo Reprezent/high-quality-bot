@@ -39,11 +39,8 @@ fn main() {
     });
 
     let api_proto = proto_dir.join("api.proto");
-    let ui_proto = proto_dir.join("ui.proto");
-    for proto in [&api_proto, &ui_proto] {
-        if !proto.exists() {
-            panic!("{} not found in {}", proto.display(), proto_dir.display());
-        }
+    if !api_proto.exists() {
+        panic!("api.proto not found in {}", proto_dir.display());
     }
 
     let mut includes = vec![proto_dir.clone()];
@@ -59,6 +56,6 @@ fn main() {
     let mut config = prost_build::Config::new();
     config.file_descriptor_set_path(out_dir.join("mop_descriptor.bin"));
     config
-        .compile_protos(&[api_proto, ui_proto], &includes)
+        .compile_protos(&[api_proto], &includes)
         .expect("failed to compile wowsims/mop protobuf files");
 }

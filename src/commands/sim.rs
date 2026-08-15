@@ -1,64 +1,102 @@
 use crate::Context;
 use crate::db;
-use crate::ui_import::{
-    INPUT_FORMAT_INDIVIDUAL_UI_EXPORT, ImportedIndividualSim, MOP_UPSTREAM_REVISION,
-    protojson_message_to_value,
-};
-use anyhow::{Context as _, Result, anyhow, bail};
-use poise::serenity_prelude as serenity;
+use crate::sim_request_codec::{INPUT_FORMAT_GEAR_JSON, MOP_UPSTREAM_REVISION};
+use anyhow::Result;
+use serde_json::Value;
 use uuid::Uuid;
 
-const MAX_UI_EXPORT_BYTES: usize = 8 * 1024 * 1024;
+fn normalize_class(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches("Class")
+        .to_ascii_lowercase()
+        .replace('_', "")
+        .replace('-', "")
+}
 
-async fn read_ui_export(
-    inline_export: Option<String>,
-    export_file: Option<serenity::Attachment>,
-) -> Result<String> {
-    match (inline_export, export_file) {
-        (Some(_), Some(_)) => {
-            bail!("provide either the `export_json` text or a `.json` attachment, not both")
-        }
-        (Some(export), None) => {
-            if export.trim().is_empty() {
-                bail!("the `export_json` text cannot be empty");
-            }
-            if export.len() > MAX_UI_EXPORT_BYTES {
-                bail!(
-                    "the `export_json` text exceeds the {} MiB limit; upload it as a `.json` attachment instead",
-                    MAX_UI_EXPORT_BYTES / (1024 * 1024)
-                );
-            }
-            Ok(export)
-        }
-        (None, Some(attachment)) => {
-            if !attachment.filename.to_ascii_lowercase().ends_with(".json") {
-                bail!("the attached export must have a `.json` filename");
-            }
-            if attachment.size as usize > MAX_UI_EXPORT_BYTES {
-                bail!(
-                    "the attached export exceeds the {} MiB limit",
-                    MAX_UI_EXPORT_BYTES / (1024 * 1024)
-                );
-            }
-
-            let bytes = attachment
-                .download()
-                .await
-                .context("failed to download the attached WoWSims export")?;
-            if bytes.len() > MAX_UI_EXPORT_BYTES {
-                bail!(
-                    "the attached export exceeds the {} MiB limit",
-                    MAX_UI_EXPORT_BYTES / (1024 * 1024)
-                );
-            }
-
-            String::from_utf8(bytes)
-                .map_err(|_| anyhow!("the attached export must be UTF-8 encoded JSON"))
-        }
-        (None, None) => {
-            bail!("provide a WoWSims individual UI JSON export as text or a `.json` attachment")
-        }
+fn extract_class_spec_from_payload(payload: &Value) -> Option<(String, String)> {
+    if let (Some(class), Some(spec)) = (
+        payload.get("class").and_then(|value| value.as_str()),
+        payload.get("spec").and_then(|value| value.as_str()),
+    ) {
+        return Some((normalize_class(class), spec.trim().to_ascii_lowercase()));
     }
+
+    let player = payload.get("player")?.as_object()?;
+    let class = player.get("class")?.as_str()?;
+    let spec = if player.contains_key("bloodDeathKnight") {
+        "blood"
+    } else if player.contains_key("frostDeathKnight") {
+        "frost"
+    } else if player.contains_key("unholyDeathKnight") {
+        "unholy"
+    } else if player.contains_key("balanceDruid") {
+        "balance"
+    } else if player.contains_key("feralDruid") {
+        "feral"
+    } else if player.contains_key("guardianDruid") {
+        "guardian"
+    } else if player.contains_key("restorationDruid") {
+        "restoration"
+    } else if player.contains_key("beastMasteryHunter") {
+        "beastmastery"
+    } else if player.contains_key("marksmanshipHunter") {
+        "marksmanship"
+    } else if player.contains_key("survivalHunter") {
+        "survival"
+    } else if player.contains_key("arcaneMage") {
+        "arcane"
+    } else if player.contains_key("fireMage") {
+        "fire"
+    } else if player.contains_key("frostMage") {
+        "frost"
+    } else if player.contains_key("brewmasterMonk") {
+        "brewmaster"
+    } else if player.contains_key("mistweaverMonk") {
+        "mistweaver"
+    } else if player.contains_key("windwalkerMonk") {
+        "windwalker"
+    } else if player.contains_key("holyPaladin") {
+        "holy"
+    } else if player.contains_key("protectionPaladin") {
+        "protection"
+    } else if player.contains_key("retributionPaladin") {
+        "retribution"
+    } else if player.contains_key("disciplinePriest") {
+        "discipline"
+    } else if player.contains_key("holyPriest") {
+        "holy"
+    } else if player.contains_key("shadowPriest") {
+        "shadow"
+    } else if player.contains_key("assassinationRogue") {
+        "assassination"
+    } else if player.contains_key("combatRogue") {
+        "combat"
+    } else if player.contains_key("subtletyRogue") {
+        "subtlety"
+    } else if player.contains_key("elementalShaman") {
+        "elemental"
+    } else if player.contains_key("enhancementShaman") {
+        "enhancement"
+    } else if player.contains_key("restorationShaman") {
+        "restoration"
+    } else if player.contains_key("afflictionWarlock") {
+        "affliction"
+    } else if player.contains_key("demonologyWarlock") {
+        "demonology"
+    } else if player.contains_key("destructionWarlock") {
+        "destruction"
+    } else if player.contains_key("armsWarrior") {
+        "arms"
+    } else if player.contains_key("furyWarrior") {
+        "fury"
+    } else if player.contains_key("protectionWarrior") {
+        "protection"
+    } else {
+        return None;
+    };
+
+    Some((normalize_class(class), spec.to_string()))
 }
 
 fn format_metric(value: f64) -> String {
@@ -69,59 +107,33 @@ fn format_metric(value: f64) -> String {
     }
 }
 
-/// Run a World of Warcraft simulation from a complete WoWSims individual UI JSON export.
+/// Run a World of Warcraft simulation from a gear profile.
 ///
-/// Usage: `/sim export_json:<json>` or `/sim export_file:<attachment.json>`
+/// Usage: `/sim <gear_json>`
 #[poise::command(slash_command, rename = "sim")]
 pub async fn sim(
     ctx: Context<'_>,
-    #[description = "Complete WoWSims individual UI JSON export"] export_json: Option<String>,
-    #[description = "Complete WoWSims individual UI JSON export (.json)"] export_file: Option<
-        serenity::Attachment,
-    >,
+    #[description = "Gear profile JSON (must include class, spec, and gear.items)"]
+    gear_json: String,
 ) -> Result<()> {
-    let source_text = match read_ui_export(export_json, export_file).await {
-        Ok(source_text) => source_text,
-        Err(error) => {
-            ctx.say(format!("❌ {error:#}")).await?;
-            return Ok(());
-        }
-    };
-    let source_payload = match serde_json::from_str(&source_text) {
+    let source_payload = match serde_json::from_str(&gear_json) {
         Ok(payload) => payload,
         Err(error) => {
-            ctx.say(format!(
-                "❌ The WoWSims export is not valid JSON: {}",
-                error
-            ))
-            .await?;
+            ctx.say(format!("❌ The gear profile is not valid JSON: {}", error))
+                .await?;
             return Ok(());
         }
     };
-    let imported = match ImportedIndividualSim::from_json(&source_payload) {
-        Ok(imported) => imported,
-        Err(error) => {
-            ctx.say(format!(
-                "❌ Invalid WoWSims individual UI export: {error:#}"
-            ))
-            .await?;
-            return Ok(());
-        }
-    };
-    let run_id = Uuid::new_v4();
-    let normalized = match imported.normalize(run_id) {
-        Ok(normalized) => normalized,
-        Err(error) => {
-            ctx.say(format!(
-                "❌ Could not normalize the WoWSims UI export: {error:#}"
-            ))
-            .await?;
-            return Ok(());
-        }
-    };
-    let normalized_request =
-        protojson_message_to_value("proto.RaidSimRequest", &normalized.request)?;
 
+    let Some((class, spec)) = extract_class_spec_from_payload(&source_payload) else {
+        ctx.say(
+            "❌ Could not determine class/spec. Include top-level `class` and `spec`, or a WoWSims `player` object with its spec section.",
+        )
+        .await?;
+        return Ok(());
+    };
+
+    let run_id = Uuid::new_v4();
     let user_id = ctx.author().id.to_string();
     let user_id_for_reply = ctx.author().id;
     let channel_id = ctx.channel_id();
@@ -133,14 +145,14 @@ pub async fn sim(
         &db::NewSimulationRun {
             run_id,
             discord_user_id: &user_id,
-            class: &normalized.class,
-            spec: &normalized.spec,
+            class: &class,
+            spec: &spec,
             source_payload: &source_payload,
-            input_format: INPUT_FORMAT_INDIVIDUAL_UI_EXPORT,
+            input_format: INPUT_FORMAT_GEAR_JSON,
             upstream_revision: Some(MOP_UPSTREAM_REVISION),
-            normalized_request: Some(&normalized_request),
-            effective_random_seed: Some(normalized.effective_random_seed),
-            effective_iterations: Some(normalized.effective_iterations),
+            normalized_request: None,
+            effective_random_seed: None,
+            effective_iterations: None,
         },
     )
     .await?;
@@ -222,14 +234,9 @@ pub async fn sim(
 
     // Acknowledge quickly so Discord doesn't time out
     ctx.say(format!(
-        "✅ Got your WoWSims UI export for **{class}/{spec}**!\n\
-         • Iterations: **{iterations}**\n\
-         • Seed: `{seed}`\n\
+        "✅ Got your gear profile for **{class}/{spec}**!\n\
+         • Server defaults will supply raid buffs, encounter, sim options, and missing player settings.\n\
          • Run ID: `{run_id}`",
-        class = normalized.class,
-        spec = normalized.spec,
-        iterations = normalized.effective_iterations,
-        seed = normalized.effective_random_seed,
     ))
     .await?;
 
@@ -239,24 +246,34 @@ pub async fn sim(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
-    #[tokio::test]
-    async fn rejects_empty_inline_export() {
-        let error = read_ui_export(Some(" \n\t".to_string()), None)
-            .await
-            .unwrap_err();
+    #[test]
+    fn reads_class_and_spec_from_a_flat_gear_profile() {
+        let payload = json!({
+            "class": "mage",
+            "spec": "arcane",
+            "gear": { "items": [] },
+        });
 
-        assert!(error.to_string().contains("cannot be empty"));
+        assert_eq!(
+            extract_class_spec_from_payload(&payload),
+            Some(("mage".to_string(), "arcane".to_string()))
+        );
     }
 
-    #[tokio::test]
-    async fn accepts_non_empty_inline_export() {
-        let export = r#"{"apiVersion":15}"#.to_string();
+    #[test]
+    fn reads_class_and_spec_from_a_wowsims_player_payload() {
+        let payload = json!({
+            "player": {
+                "class": "ClassMage",
+                "arcaneMage": {},
+            },
+        });
 
-        let received = read_ui_export(Some(export.clone()), None)
-            .await
-            .expect("inline export should be accepted");
-
-        assert_eq!(received, export);
+        assert_eq!(
+            extract_class_spec_from_payload(&payload),
+            Some(("mage".to_string(), "arcane".to_string()))
+        );
     }
 }

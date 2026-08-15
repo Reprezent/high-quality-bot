@@ -1,22 +1,16 @@
 use anyhow::{Context, Result, anyhow};
 use prost::Message;
-use serde_json::Value;
 use sqlx::PgPool;
 use std::collections::HashSet;
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
 use crate::db;
-use crate::mop_proto::mop::{
-    AsyncApiResult, Debuffs, PartyBuffs, ProgressMetrics, Raid, RaidBuffs, RaidSimRequest, SimType,
-};
+use crate::mop_proto::mop::{AsyncApiResult, ProgressMetrics, Raid, RaidSimRequest, SimType};
 use crate::parsing::build_player_from_run;
+use crate::sim_request_codec::{parse_raid_sim_request, protojson_message_to_value};
 use crate::sim_runtime_targets::{
     default_mop_encounter, default_mop_raid, default_mop_sim_options,
-};
-use crate::ui_import::{
-    INPUT_FORMAT_INDIVIDUAL_UI_EXPORT, parse_normalized_raid_sim_request, parse_protojson_message,
-    protojson_message_to_value,
 };
 
 fn raid_player_count(raid: &Raid) -> usize {
@@ -87,54 +81,6 @@ fn extract_raid_members(progress: &ProgressMetrics) -> Vec<String> {
     raid_members
 }
 
-fn extract_raid_buffs_payload(payload: &Value) -> Option<&Value> {
-    payload
-        .get("raidBuffs")
-        .or_else(|| payload.get("raid_buffs"))
-        .or_else(|| {
-            payload
-                .get("settings")
-                .and_then(|settings| settings.get("raidBuffs"))
-        })
-        .or_else(|| {
-            payload
-                .get("settings")
-                .and_then(|settings| settings.get("raid_buffs"))
-        })
-}
-
-fn extract_debuffs_payload(payload: &Value) -> Option<&Value> {
-    payload.get("debuffs").or_else(|| {
-        payload
-            .get("settings")
-            .and_then(|settings| settings.get("debuffs"))
-    })
-}
-
-fn extract_party_buffs_payload(payload: &Value) -> Option<&Value> {
-    payload
-        .get("partyBuffs")
-        .or_else(|| payload.get("party_buffs"))
-        .or_else(|| {
-            payload
-                .get("settings")
-                .and_then(|settings| settings.get("partyBuffs"))
-        })
-        .or_else(|| {
-            payload
-                .get("settings")
-                .and_then(|settings| settings.get("party_buffs"))
-        })
-        .or_else(|| {
-            payload
-                .get("raid")
-                .and_then(|raid| raid.get("parties"))
-                .and_then(|parties| parties.as_array())
-                .and_then(|parties| parties.first())
-                .and_then(|party| party.get("buffs"))
-        })
-}
-
 fn maybe_log_request_json(run_id: Uuid, request: &RaidSimRequest) {
     let enabled = std::env::var("LOG_SIM_REQUEST_JSON")
         .map(|value| {
@@ -159,57 +105,9 @@ fn maybe_log_request_json(run_id: Uuid, request: &RaidSimRequest) {
     }
 }
 
-fn build_legacy_request(run: &db::SimulationRun, run_id: Uuid) -> Result<RaidSimRequest> {
+fn build_default_request(run: &db::SimulationRun, run_id: Uuid) -> Result<RaidSimRequest> {
     let mapped_player = build_player_from_run(run)?;
     let mut raid = default_mop_raid();
-
-    if let Some(raid_buffs_payload) = extract_raid_buffs_payload(&run.gear_payload) {
-        match parse_protojson_message::<RaidBuffs>("proto.RaidBuffs", raid_buffs_payload) {
-            Ok(raid_buffs) => {
-                raid.buffs = Some(raid_buffs);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    run_id = %run_id,
-                    error = ?error,
-                    "failed to parse legacy raidBuffs from payload; using default raid buffs"
-                );
-            }
-        }
-    }
-
-    if let Some(debuffs_payload) = extract_debuffs_payload(&run.gear_payload) {
-        match parse_protojson_message::<Debuffs>("proto.Debuffs", debuffs_payload) {
-            Ok(debuffs) => {
-                raid.debuffs = Some(debuffs);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    run_id = %run_id,
-                    error = ?error,
-                    "failed to parse legacy debuffs from payload; using default debuffs"
-                );
-            }
-        }
-    }
-
-    if let Some(party_buffs_payload) = extract_party_buffs_payload(&run.gear_payload) {
-        match parse_protojson_message::<PartyBuffs>("proto.PartyBuffs", party_buffs_payload) {
-            Ok(party_buffs) => {
-                if let Some(party) = raid.parties.get_mut(0) {
-                    party.buffs = Some(party_buffs);
-                }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    run_id = %run_id,
-                    error = ?error,
-                    "failed to parse legacy partyBuffs from payload; using default party buffs"
-                );
-            }
-        }
-    }
-
     raid.parties[0].players[0] = mapped_player;
 
     Ok(RaidSimRequest {
@@ -236,15 +134,26 @@ pub async fn run_async_simulation(
         .ok_or_else(|| anyhow!("simulation run not found: {}", run_id))?;
 
     let mut request = match run.normalized_request.as_ref() {
-        Some(payload) => parse_normalized_raid_sim_request(payload).with_context(|| {
+        Some(payload) => parse_raid_sim_request(payload).with_context(|| {
             format!("failed to load normalized simulation request for run {run_id}")
         })?,
-        None if run.input_format == INPUT_FORMAT_INDIVIDUAL_UI_EXPORT => {
-            return Err(anyhow!(
-                "individual UI export run {run_id} is missing its normalized request"
-            ));
+        None => {
+            let request = build_default_request(&run, run_id)?;
+            let normalized_request = protojson_message_to_value("proto.RaidSimRequest", &request)?;
+            let sim_options = request
+                .sim_options
+                .as_ref()
+                .ok_or_else(|| anyhow!("default simulation request is missing sim options"))?;
+            db::update_simulation_run_request(
+                &pool,
+                run_id,
+                &normalized_request,
+                sim_options.random_seed,
+                sim_options.iterations,
+            )
+            .await?;
+            request
         }
-        None => build_legacy_request(&run, run_id)?,
     };
     request.request_id = request_id.clone();
 
@@ -477,22 +386,36 @@ pub async fn run_async_simulation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui_import::ImportedIndividualSim;
+    use chrono::Utc;
+    use serde_json::Value;
 
     #[tokio::test]
     #[ignore = "requires a running WoWSims async API at WOWSIMS_API_BASE_URL"]
-    async fn submits_a_normalized_individual_ui_request_to_the_async_api() {
+    async fn submits_a_defaulted_gear_profile_request_to_the_async_api() {
         let base_url = std::env::var("WOWSIMS_API_BASE_URL")
             .expect("WOWSIMS_API_BASE_URL must point at a running simulator");
-        let mut payload: Value =
-            serde_json::from_str(include_str!("../tests/fixtures/individual-ui-export.json"))
+        let payload: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/gear-profile.json"))
                 .expect("fixture must be valid JSON");
-        payload["settings"]["iterations"] = serde_json::json!(1);
-        let request = ImportedIndividualSim::from_json(&payload)
-            .expect("fixture must import")
-            .normalize(Uuid::new_v4())
-            .expect("fixture must normalize")
-            .request;
+        let run = db::SimulationRun {
+            run_id: Uuid::new_v4(),
+            discord_user_id: "smoke-test".to_string(),
+            class: "mage".to_string(),
+            spec: "arcane".to_string(),
+            gear_payload: payload,
+            input_format: "gear-json".to_string(),
+            upstream_revision: None,
+            normalized_request: None,
+            effective_random_seed: None,
+            effective_iterations: None,
+            raid_members: Vec::new(),
+            status: "queued".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let mut request =
+            build_default_request(&run, run.run_id).expect("fixture must build a default request");
+        request.sim_options.as_mut().unwrap().iterations = 1;
         let client = reqwest::Client::new();
 
         let response = client

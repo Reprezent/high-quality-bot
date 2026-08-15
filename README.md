@@ -6,7 +6,7 @@ A Discord bot written in Rust that runs World of Warcraft simulations via slash 
 
 | Command | Description |
 |---------|-------------|
-| `/sim [export_json] [export_file]` | Queue a simulation from a complete WoWSims individual-character UI JSON export. Use one input source only; a `.json` attachment is recommended. |
+| `/sim <gear_json>` | Queue a simulation from a gear profile JSON payload containing class, spec, and gear items. The server supplies raid, encounter, and sim defaults. |
 | `/class <class>[:<spec>]` | Save your default class (and optionally spec) to the database. |
 | `/status <run-id>` | Check the current status of a simulation run by its UUID. |
 | `/health` | Check if the bot can reach PostgreSQL and the wowsims async API. |
@@ -24,31 +24,38 @@ A Discord bot written in Rust that runs World of Warcraft simulations via slash 
 /piss
 ```
 
-### Running a WoWSims individual UI export
+### Running a gear profile
 
-`/sim` accepts the canonical JSON exported by a WoWSims **individual-character**
-page. In the web UI, use the JSON export action and select every simulation
-category, then upload the resulting `.json` file as the `export_file` option to
-`/sim`. Pasting it into `export_json` is available for small exports, but custom
-APLs commonly exceed Discord's slash-command text limit.
+`/sim` accepts a compact gear profile JSON payload. It supports the flat
+Warcraft Logs-style shape (`class`, `spec`, `name`, `race`, `talents`, `glyphs`,
+`professions`, and `gear.items`) as well as the existing nested WoWSims player
+shape. The payload must provide class and spec so the bot can select the
+appropriate player implementation and default rotation.
 
-The bot validates the exported `IndividualSimSettings` schema and submits the
-same simulation-relevant configuration as the individual UI:
+The bot preserves the simulation-relevant player data that is supplied:
 
-- Full player configuration: race, gear, gems, enchants, reforges, talents,
-  glyphs, professions, consumes, cooldowns, spec options, individual buffs, and
-  APL rotation.
-- Raid/party buffs, debuffs, target dummies, and tank assignment.
-- Encounter duration, execute thresholds, targets, and health mode.
-- Iterations and fixed RNG seed.
+- Character name, race, talents, glyphs, professions, gear, gems, enchants,
+  reforges, and upgrade levels.
+- A custom rotation when the payload includes one; otherwise the bot loads the
+  vendored default APL for that class/spec.
 
-When the UI export has no fixed seed, the bot generates one, reports it in the
-acknowledgement, and stores it with the run. Reuse that seed in the UI export to
-make a browser/server comparison reproducible.
+The server deliberately supplies the rest: default raid and party buffs,
+debuffs, encounter target and duration, 12,500 iterations, and a generated
+random seed. The generated request, seed, and iterations are persisted with the
+run for diagnostics and reproducibility.
 
-Full raid-page exports are intentionally not accepted yet. The current command
-matches the individual-character UI and creates its equivalent one-player raid
-request.
+For example:
+
+```json
+{
+  "class": "mage",
+  "spec": "arcane",
+  "race": "NightElf",
+  "talents": "311222",
+  "professions": [{"name": "Enchanting"}, {"name": "Tailoring"}],
+  "gear": {"items": [{"id": 103900, "gems": [95347, 76700], "upgrade_step": 2}]}
+}
+```
 
 ## Prerequisites
 
@@ -159,7 +166,7 @@ git add vendor/wowsims-mop .gitmodules
 
 When advancing the submodule, also update `MOP_UPSTREAM_REVISION` in
 [`build.rs`](build.rs) to the new submodule commit so persisted runs retain the
-schema revision that decoded their export.
+simulator revision used to normalize their request.
 
 ### Running the local async sim API
 

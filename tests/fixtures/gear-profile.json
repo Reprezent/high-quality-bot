@@ -1,0 +1,39 @@
+{
+  "talents": "311222",
+  "id": "Player-4385-05FE966D",
+  "class": "mage",
+  "unit": "player",
+  "professions": [
+    {"name": "Enchanting", "level": 600},
+    {"name": "Tailoring", "level": 600}
+  ],
+  "race": "NightElf",
+  "name": "Autismowismo",
+  "spec": "arcane",
+  "gear": {
+    "items": [
+      {"id": 103900, "reforging": 140, "upgrade_step": 2, "gems": [95347, 76700]},
+      {"id": 104967, "reforging": 138, "upgrade_step": 2, "gems": []},
+      {"enchant": 4806, "id": 103807, "reforging": 138, "upgrade_step": 2, "gems": [76643, 76643]},
+      {"id": 102246, "gems": [76671], "upgrade_step": 2, "enchant": 4892},
+      {"id": 103802, "reforging": 140, "upgrade_step": 2, "gems": [76672, 76700, 76577]},
+      {"enchant": 4414, "id": 103850, "reforging": 140, "upgrade_step": 2, "gems": []},
+      {"enchant": 4433, "id": 99160, "reforging": 147, "upgrade_step": 2, "gems": [76672, 76672]},
+      {"id": 96462, "reforging": 140, "upgrade_step": 2, "gems": [76672, 76700, 76700]},
+      {"enchant": 4895, "id": 99162, "reforging": 145, "upgrade_step": 2, "gems": [76700, 76700]},
+      {"enchant": 4429, "id": 95004, "reforging": 145, "upgrade_step": 2, "gems": [76700, 76577]},
+      {"enchant": 4360, "id": 96529, "reforging": 145, "upgrade_step": 2, "gems": [76700]},
+      {"enchant": 4360, "id": 96754, "reforging": 138, "upgrade_step": 2, "gems": []},
+      {"id": 96413, "reforging": 140, "upgrade_step": 2, "gems": []},
+      {"id": 102300, "gems": [], "upgrade_step": 2},
+      {"enchant": 4442, "id": 103874, "reforging": 147, "upgrade_step": 2, "gems": [76672]}
+    ]
+  },
+  "glyphs": {
+    "minor": [{"spellID": 63093}, {"spellID": 56363}],
+    "major": [{"spellID": 146659}, {"spellID": 115705}, {"spellID": 62210}]
+  },
+  "level": 90,
+  "version": "v3.2.4",
+  "realm": "Pagle"
+}
