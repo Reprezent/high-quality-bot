@@ -1,22 +1,22 @@
 use crate::{
     db::{WclPendingFight, WclReportToAnnounce},
-    warcraft_logs::{KillSummary, MetricEntry},
+    warcraft_logs::{KillSummary, MetricEntry, WarcraftLogsSite},
 };
 use poise::serenity_prelude as serenity;
 use serenity::{CreateEmbed, CreateEmbedFooter, Nonce};
 
 const WARCRAFT_LOGS_COLOR: u32 = 0xF28C28;
 
-pub fn report_url(code: &str) -> String {
-    format!("https://www.warcraftlogs.com/reports/{code}")
+pub fn report_url(site: WarcraftLogsSite, code: &str) -> String {
+    site.report_url(code)
 }
 
-pub fn fight_url(code: &str, fight_id: i32) -> String {
-    format!("https://www.warcraftlogs.com/reports/{code}#fight={fight_id}&type=summary")
+pub fn fight_url(site: WarcraftLogsSite, code: &str, fight_id: i32) -> String {
+    format!("{}#fight={fight_id}&type=summary", site.report_url(code))
 }
 
 pub fn report_embed(report: &WclReportToAnnounce) -> CreateEmbed {
-    let url = report_url(&report.code);
+    let url = report_url(report.wcl_site, &report.code);
     let mut embed = CreateEmbed::new()
         .color(WARCRAFT_LOGS_COLOR)
         .title(truncate(&report.title, 256))
@@ -43,7 +43,7 @@ pub fn report_embed(report: &WclReportToAnnounce) -> CreateEmbed {
 }
 
 pub fn kill_embed(fight: &WclPendingFight, summary: &KillSummary) -> CreateEmbed {
-    let url = fight_url(&fight.report_code, fight.fight.fight_id);
+    let url = fight_url(fight.wcl_site, &fight.report_code, fight.fight.fight_id);
     let duration_ms = (fight.fight.end_time_ms - fight.fight.start_time_ms).max(0);
     let kill_time_ms = fight.report_start_time_ms + fight.fight.end_time_ms;
     let raid_size = fight
@@ -191,17 +191,18 @@ fn truncate(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{fight_nonce, fight_url, format_duration, format_number, report_url};
+    use crate::warcraft_logs::WarcraftLogsSite;
     use poise::serenity_prelude::Nonce;
 
     #[test]
     fn builds_canonical_report_urls() {
         assert_eq!(
-            report_url("abc123"),
+            report_url(WarcraftLogsSite::Retail, "abc123"),
             "https://www.warcraftlogs.com/reports/abc123"
         );
         assert_eq!(
-            fight_url("abc123", 7),
-            "https://www.warcraftlogs.com/reports/abc123#fight=7&type=summary"
+            fight_url(WarcraftLogsSite::Classic, "abc123", 7),
+            "https://classic.warcraftlogs.com/reports/abc123#fight=7&type=summary"
         );
     }
 

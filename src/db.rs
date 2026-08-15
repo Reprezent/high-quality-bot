@@ -6,6 +6,8 @@ use sqlx::{
 };
 use uuid::Uuid;
 
+use crate::warcraft_logs::WarcraftLogsSite;
+
 /// Establish a connection pool to PostgreSQL and run migrations.
 pub async fn create_pool(connect_options: PgConnectOptions) -> Result<PgPool> {
     let pool = PgPoolOptions::new()
@@ -303,6 +305,7 @@ pub struct WclSubscription {
     pub discord_guild_id: String,
     pub discord_channel_id: String,
     pub wcl_guild_id: i64,
+    pub wcl_site: WarcraftLogsSite,
     pub wcl_guild_name: String,
     pub server_name: String,
     pub region: String,
@@ -315,6 +318,7 @@ pub struct WclSubscription {
 pub struct WclReportToAnnounce {
     pub subscription_id: i64,
     pub discord_channel_id: String,
+    pub wcl_site: WarcraftLogsSite,
     pub wcl_guild_name: String,
     pub code: String,
     pub title: String,
@@ -345,6 +349,7 @@ pub struct WclFightRecord {
 pub struct WclPendingFight {
     pub subscription_id: i64,
     pub discord_channel_id: String,
+    pub wcl_site: WarcraftLogsSite,
     pub wcl_guild_name: String,
     pub report_code: String,
     pub report_title: String,
@@ -356,6 +361,7 @@ pub struct NewWclSubscription<'a> {
     pub discord_guild_id: &'a str,
     pub discord_channel_id: &'a str,
     pub wcl_guild_id: i64,
+    pub wcl_site: WarcraftLogsSite,
     pub wcl_guild_name: &'a str,
     pub server_slug: &'a str,
     pub server_name: &'a str,
@@ -384,17 +390,18 @@ pub async fn replace_wcl_subscription(
     let row = sqlx::query(
         r#"
         INSERT INTO warcraft_logs_subscriptions (
-            discord_guild_id, discord_channel_id, wcl_guild_id,
+            discord_guild_id, discord_channel_id, wcl_guild_id, wcl_site,
             wcl_guild_name, server_slug, server_name, region,
             baseline_time_ms, discovery_cursor_ms
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
         RETURNING id
         "#,
     )
     .bind(subscription.discord_guild_id)
     .bind(subscription.discord_channel_id)
     .bind(subscription.wcl_guild_id)
+    .bind(subscription.wcl_site.slug())
     .bind(subscription.wcl_guild_name)
     .bind(subscription.server_slug)
     .bind(subscription.server_name)
@@ -490,7 +497,7 @@ pub async fn get_wcl_subscription(
 ) -> Result<Option<WclSubscription>> {
     let row = sqlx::query(
         r#"
-        SELECT id, discord_guild_id, discord_channel_id, wcl_guild_id,
+        SELECT id, discord_guild_id, discord_channel_id, wcl_guild_id, wcl_site,
                wcl_guild_name, server_name, region, discovery_cursor_ms,
                last_polled_at, last_error
         FROM warcraft_logs_subscriptions
@@ -501,13 +508,13 @@ pub async fn get_wcl_subscription(
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|row| wcl_subscription_from_row(&row)))
+    row.map(|row| wcl_subscription_from_row(&row)).transpose()
 }
 
 pub async fn list_wcl_subscriptions(pool: &PgPool) -> Result<Vec<WclSubscription>> {
     let rows = sqlx::query(
         r#"
-        SELECT id, discord_guild_id, discord_channel_id, wcl_guild_id,
+        SELECT id, discord_guild_id, discord_channel_id, wcl_guild_id, wcl_site,
                wcl_guild_name, server_name, region, discovery_cursor_ms,
                last_polled_at, last_error
         FROM warcraft_logs_subscriptions
@@ -518,22 +525,23 @@ pub async fn list_wcl_subscriptions(pool: &PgPool) -> Result<Vec<WclSubscription
     .fetch_all(pool)
     .await?;
 
-    Ok(rows.iter().map(wcl_subscription_from_row).collect())
+    rows.iter().map(wcl_subscription_from_row).collect()
 }
 
-fn wcl_subscription_from_row(row: &sqlx::postgres::PgRow) -> WclSubscription {
-    WclSubscription {
+fn wcl_subscription_from_row(row: &sqlx::postgres::PgRow) -> Result<WclSubscription> {
+    Ok(WclSubscription {
         id: row.get("id"),
         discord_guild_id: row.get("discord_guild_id"),
         discord_channel_id: row.get("discord_channel_id"),
         wcl_guild_id: row.get("wcl_guild_id"),
+        wcl_site: WarcraftLogsSite::from_slug(row.get("wcl_site"))?,
         wcl_guild_name: row.get("wcl_guild_name"),
         server_name: row.get("server_name"),
         region: row.get("region"),
         discovery_cursor_ms: row.get("discovery_cursor_ms"),
         last_polled_at: row.get("last_polled_at"),
         last_error: row.get("last_error"),
-    }
+    })
 }
 
 pub async fn reconcile_wcl_reports(
@@ -606,7 +614,7 @@ pub async fn list_wcl_reports_to_announce(
 ) -> Result<Vec<WclReportToAnnounce>> {
     let rows = sqlx::query(
         r#"
-        SELECT s.id AS subscription_id, s.discord_channel_id, s.wcl_guild_name,
+        SELECT s.id AS subscription_id, s.discord_channel_id, s.wcl_site, s.wcl_guild_name,
                r.code, r.title, r.start_time_ms, r.zone_name
         FROM warcraft_logs_reports r
         JOIN warcraft_logs_subscriptions s ON s.id = r.subscription_id
@@ -619,18 +627,20 @@ pub async fn list_wcl_reports_to_announce(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .iter()
-        .map(|row| WclReportToAnnounce {
-            subscription_id: row.get("subscription_id"),
-            discord_channel_id: row.get("discord_channel_id"),
-            wcl_guild_name: row.get("wcl_guild_name"),
-            code: row.get("code"),
-            title: row.get("title"),
-            start_time_ms: row.get("start_time_ms"),
-            zone_name: row.get("zone_name"),
+    rows.iter()
+        .map(|row| {
+            Ok(WclReportToAnnounce {
+                subscription_id: row.get("subscription_id"),
+                discord_channel_id: row.get("discord_channel_id"),
+                wcl_site: WarcraftLogsSite::from_slug(row.get("wcl_site"))?,
+                wcl_guild_name: row.get("wcl_guild_name"),
+                code: row.get("code"),
+                title: row.get("title"),
+                start_time_ms: row.get("start_time_ms"),
+                zone_name: row.get("zone_name"),
+            })
         })
-        .collect())
+        .collect()
 }
 
 pub async fn mark_wcl_report_posted(
@@ -783,7 +793,7 @@ pub async fn list_pending_wcl_fights(
 ) -> Result<Vec<WclPendingFight>> {
     let rows = sqlx::query(
         r#"
-        SELECT f.subscription_id, s.discord_channel_id, s.wcl_guild_name,
+        SELECT f.subscription_id, s.discord_channel_id, s.wcl_site, s.wcl_guild_name,
                f.report_code, r.title AS report_title,
                r.start_time_ms AS report_start_time_ms,
                f.fight_id, f.boss_name, f.difficulty, f.raid_size,
@@ -801,26 +811,28 @@ pub async fn list_pending_wcl_fights(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .iter()
-        .map(|row| WclPendingFight {
-            subscription_id: row.get("subscription_id"),
-            discord_channel_id: row.get("discord_channel_id"),
-            wcl_guild_name: row.get("wcl_guild_name"),
-            report_code: row.get("report_code"),
-            report_title: row.get("report_title"),
-            report_start_time_ms: row.get("report_start_time_ms"),
-            fight: WclFightRecord {
-                fight_id: row.get("fight_id"),
-                boss_name: row.get("boss_name"),
-                difficulty: row.get("difficulty"),
-                raid_size: row.get("raid_size"),
-                average_item_level: row.get("average_item_level"),
-                start_time_ms: row.get("start_time_ms"),
-                end_time_ms: row.get("end_time_ms"),
-            },
+    rows.iter()
+        .map(|row| {
+            Ok(WclPendingFight {
+                subscription_id: row.get("subscription_id"),
+                discord_channel_id: row.get("discord_channel_id"),
+                wcl_site: WarcraftLogsSite::from_slug(row.get("wcl_site"))?,
+                wcl_guild_name: row.get("wcl_guild_name"),
+                report_code: row.get("report_code"),
+                report_title: row.get("report_title"),
+                report_start_time_ms: row.get("report_start_time_ms"),
+                fight: WclFightRecord {
+                    fight_id: row.get("fight_id"),
+                    boss_name: row.get("boss_name"),
+                    difficulty: row.get("difficulty"),
+                    raid_size: row.get("raid_size"),
+                    average_item_level: row.get("average_item_level"),
+                    start_time_ms: row.get("start_time_ms"),
+                    end_time_ms: row.get("end_time_ms"),
+                },
+            })
         })
-        .collect())
+        .collect()
 }
 
 pub async fn mark_wcl_fight_posted(
@@ -975,6 +987,7 @@ mod tests {
         mark_wcl_fight_posted, mark_wcl_report_posted, reconcile_wcl_reports,
         remove_wcl_subscription, replace_wcl_subscription,
     };
+    use crate::warcraft_logs::WarcraftLogsSite;
     use sqlx::PgPool;
     use uuid::Uuid;
 
@@ -1014,6 +1027,7 @@ mod tests {
                 discord_guild_id: &discord_guild_id,
                 discord_channel_id: "123",
                 wcl_guild_id: 42,
+                wcl_site: WarcraftLogsSite::Classic,
                 wcl_guild_name: "Test Guild",
                 server_slug: "test-realm",
                 server_name: "Test Realm",
@@ -1026,12 +1040,11 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(
-            get_wcl_subscription(&pool, &discord_guild_id)
-                .await
-                .unwrap()
-                .is_some()
-        );
+        let subscription = get_wcl_subscription(&pool, &discord_guild_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(subscription.wcl_site, WarcraftLogsSite::Classic);
         assert!(
             list_wcl_reports_to_announce(&pool, subscription_id)
                 .await

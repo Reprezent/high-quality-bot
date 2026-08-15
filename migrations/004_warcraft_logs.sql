@@ -3,6 +3,8 @@ CREATE TABLE IF NOT EXISTS warcraft_logs_subscriptions (
     discord_guild_id    TEXT        NOT NULL UNIQUE,
     discord_channel_id  TEXT        NOT NULL,
     wcl_guild_id        BIGINT      NOT NULL,
+    wcl_site            TEXT        NOT NULL DEFAULT 'retail'
+        CHECK (wcl_site IN ('retail', 'classic')),
     wcl_guild_name      TEXT        NOT NULL,
     server_slug         TEXT        NOT NULL,
     server_name         TEXT        NOT NULL,
@@ -15,6 +17,24 @@ CREATE TABLE IF NOT EXISTS warcraft_logs_subscriptions (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE warcraft_logs_subscriptions
+    ADD COLUMN IF NOT EXISTS wcl_site TEXT NOT NULL DEFAULT 'retail';
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'warcraft_logs_subscriptions_wcl_site_check'
+          AND conrelid = 'warcraft_logs_subscriptions'::regclass
+    ) THEN
+        ALTER TABLE warcraft_logs_subscriptions
+            ADD CONSTRAINT warcraft_logs_subscriptions_wcl_site_check
+            CHECK (wcl_site IN ('retail', 'classic'));
+    END IF;
+END
+$$;
 
 CREATE TABLE IF NOT EXISTS warcraft_logs_reports (
     subscription_id    BIGINT      NOT NULL REFERENCES warcraft_logs_subscriptions(id) ON DELETE CASCADE,

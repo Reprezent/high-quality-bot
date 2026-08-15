@@ -12,7 +12,7 @@ A Discord bot written in Rust that runs World of Warcraft simulations via slash 
 | `/health` | Check if the bot can reach PostgreSQL and the wowsims async API. |
 | `/dailies` | Show when World of Warcraft US realm dailies reset next. |
 | `/piss` | Fetch the current ISS urine tank fill level from the public ISS telemetry stream. |
-| `/warcraftlogs track <guild> <server> <region> <channel>` | Post new public reports and boss kills for a Warcraft Logs guild. Requires Manage Server. |
+| `/warcraftlogs track <channel> [guild_link] [guild] [server] [region] [section]` | Post new public reports and boss kills for a Warcraft Logs guild. Requires Manage Server. |
 | `/warcraftlogs status` | Show this server's Warcraft Logs tracker status. |
 | `/warcraftlogs history` | Show the tracked guild's three most recent public reports. |
 | `/warcraftlogs untrack` | Stop tracking Warcraft Logs in this server. Requires Manage Server. |
@@ -26,7 +26,7 @@ A Discord bot written in Rust that runs World of Warcraft simulations via slash 
 /health
 /dailies
 /piss
-/warcraftlogs track "Example Guild" area-52 US #raid-logs
+/warcraftlogs track channel:#raid-logs guild_link:https://classic.warcraftlogs.com/guild/id/484
 /warcraftlogs status
 /warcraftlogs history
 ```
@@ -135,19 +135,26 @@ If `DISCORD_GUILD_ID` is set, Discord command updates are usually visible almost
 4. As a member with **Manage Server**, run:
 
    ```text
-   /warcraftlogs track guild:"Example Guild" server:"Area 52" region:US channel:#raid-logs
+   /warcraftlogs track channel:#raid-logs guild_link:https://classic.warcraftlogs.com/guild/id/484
    ```
 
-The command validates the guild and channel before replacing this Discord server's existing tracker. It records the current public reports and completed kills as a baseline, so enabling tracking does not post historical announcements. Afterward the bot:
+   You can also enter the guild manually. Manual lookup defaults to Classic; select `section:Retail` for `www.warcraftlogs.com`:
 
-- Polls Warcraft Logs because its API does not provide custom report webhooks or GraphQL subscriptions.
+   ```text
+   /warcraftlogs track channel:#raid-logs guild:"Example Guild" server:"Area 52" region:US section:Retail
+   ```
+
+The command accepts guild pages from `classic.warcraftlogs.com` and `www.warcraftlogs.com`, infers the section and guild from a copied link, and validates both the guild and Discord destination before replacing this server's existing tracker. It records the current public reports and completed kills as a baseline, so enabling tracking does not post historical announcements. Afterward the bot:
+
+- Polls the selected Warcraft Logs section because its API does not provide custom report webhooks or GraphQL subscriptions.
 - Posts a link when it discovers a new public report.
 - Tracks active/revised reports and posts one congratulations embed per completed encounter kill.
+- Keeps OAuth, GraphQL, history, and report links on the configured Classic or Retail host.
 - Includes difficulty, kill time, duration, raid size, average item level, top damage and healing, deaths, and a fight-specific report link when those metrics are available.
 - Uses durable cursors and overlapping discovery windows to avoid gaps, plus database uniqueness, confirmation retries, and Discord nonces to minimize duplicate announcements across retries or restarts.
 - Slows polling automatically when Warcraft Logs hourly API points are low.
 
-The initial integration uses bot-level client credentials and intentionally supports **public guild reports only**. Private/unlisted reports and per-user Warcraft Logs OAuth are not supported. Warcraft Logs documents report-table JSON as non-frozen; if a summary payload changes, the bot records and retries the failed summary instead of posting invented metrics.
+The integration uses bot-level client credentials and intentionally supports **public guild reports only** on the Classic and Retail Warcraft Logs sections. Private/unlisted reports and per-user Warcraft Logs OAuth are not supported. Warcraft Logs documents report-table JSON as non-frozen; if a summary payload changes, the bot records and retries the failed summary instead of posting invented metrics.
 
 Use `/warcraftlogs status` to see the destination and latest polling health. Use `/warcraftlogs history` to query Warcraft Logs for the tracked guild's three newest public reports, including reports older than the local tracking baseline. Use `/warcraftlogs untrack` to remove the tracker and its stored report/fight state.
 

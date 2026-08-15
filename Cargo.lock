@@ -919,6 +919,7 @@ dependencies = [
  "chrono",
  "dotenvy",
  "image",
+ "percent-encoding",
  "plotters",
  "poise",
  "prost",

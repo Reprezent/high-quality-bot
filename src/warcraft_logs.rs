@@ -3,13 +3,12 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::{
+    collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::sync::RwLock;
 
-const OAUTH_URL: &str = "https://www.warcraftlogs.com/oauth/token";
-const GRAPHQL_URL: &str = "https://www.warcraftlogs.com/api/v2/client";
 const TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(30);
 const REPORT_PAGE_LIMIT: i32 = 100;
 const MAX_REPORT_PAGES: i32 = 100;
@@ -18,6 +17,22 @@ const GUILD_LOOKUP_QUERY: &str = r#"
 query GuildLookup($name: String!, $serverSlug: String!, $serverRegion: String!) {
   guildData {
     guild(name: $name, serverSlug: $serverSlug, serverRegion: $serverRegion) {
+      id
+      name
+      server {
+        name
+        slug
+        region { compactName slug }
+      }
+    }
+  }
+}
+"#;
+
+const GUILD_BY_ID_QUERY: &str = r#"
+query GuildById($id: Int!) {
+  guildData {
+    guild(id: $id) {
       id
       name
       server {
@@ -151,6 +166,69 @@ fn optional_env(name: &str) -> Result<Option<String>> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum WarcraftLogsSite {
+    Retail,
+    Classic,
+}
+
+impl WarcraftLogsSite {
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::Retail => "retail",
+            Self::Classic => "classic",
+        }
+    }
+
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Retail => "Retail",
+            Self::Classic => "Classic",
+        }
+    }
+
+    pub const fn host(self) -> &'static str {
+        match self {
+            Self::Retail => "www.warcraftlogs.com",
+            Self::Classic => "classic.warcraftlogs.com",
+        }
+    }
+
+    const fn oauth_url(self) -> &'static str {
+        match self {
+            Self::Retail => "https://www.warcraftlogs.com/oauth/token",
+            Self::Classic => "https://classic.warcraftlogs.com/oauth/token",
+        }
+    }
+
+    const fn graphql_url(self) -> &'static str {
+        match self {
+            Self::Retail => "https://www.warcraftlogs.com/api/v2/client",
+            Self::Classic => "https://classic.warcraftlogs.com/api/v2/client",
+        }
+    }
+
+    pub fn from_slug(value: &str) -> Result<Self> {
+        match value {
+            "retail" => Ok(Self::Retail),
+            "classic" => Ok(Self::Classic),
+            _ => bail!("unsupported Warcraft Logs site {value:?}"),
+        }
+    }
+
+    pub fn from_host(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "warcraftlogs.com" | "www.warcraftlogs.com" => Some(Self::Retail),
+            "classic.warcraftlogs.com" => Some(Self::Classic),
+            _ => None,
+        }
+    }
+
+    pub fn report_url(self, code: &str) -> String {
+        format!("https://{}/reports/{code}", self.host())
+    }
+}
+
 #[derive(Debug)]
 struct CachedToken {
     access_token: String,
@@ -162,9 +240,9 @@ struct ClientInner {
     http: reqwest::Client,
     client_id: String,
     client_secret: String,
-    oauth_url: String,
-    graphql_url: String,
-    token: RwLock<Option<CachedToken>>,
+    oauth_url_override: Option<String>,
+    graphql_url_override: Option<String>,
+    tokens: RwLock<HashMap<WarcraftLogsSite, CachedToken>>,
 }
 
 #[derive(Clone, Debug)]
@@ -174,13 +252,25 @@ pub struct WarcraftLogsClient {
 
 impl WarcraftLogsClient {
     pub fn new(config: &WarcraftLogsConfig) -> Result<Self> {
-        Self::with_endpoints(config, OAUTH_URL, GRAPHQL_URL)
+        Self::build(config, None, None)
     }
 
     fn with_endpoints(
         config: &WarcraftLogsConfig,
         oauth_url: &str,
         graphql_url: &str,
+    ) -> Result<Self> {
+        Self::build(
+            config,
+            Some(oauth_url.to_owned()),
+            Some(graphql_url.to_owned()),
+        )
+    }
+
+    fn build(
+        config: &WarcraftLogsConfig,
+        oauth_url_override: Option<String>,
+        graphql_url_override: Option<String>,
     ) -> Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent(concat!(
@@ -197,21 +287,23 @@ impl WarcraftLogsClient {
                 http,
                 client_id: config.client_id.clone(),
                 client_secret: config.client_secret.clone(),
-                oauth_url: oauth_url.to_owned(),
-                graphql_url: graphql_url.to_owned(),
-                token: RwLock::new(None),
+                oauth_url_override,
+                graphql_url_override,
+                tokens: RwLock::new(HashMap::new()),
             }),
         })
     }
 
     pub async fn lookup_guild(
         &self,
+        site: WarcraftLogsSite,
         name: &str,
         server_slug: &str,
         region: &str,
     ) -> Result<Option<WarcraftLogsGuild>> {
         let data: GuildLookupData = self
             .graphql(
+                site,
                 GUILD_LOOKUP_QUERY,
                 GuildLookupVariables {
                     name,
@@ -224,8 +316,21 @@ impl WarcraftLogsClient {
         Ok(data.guild_data.guild)
     }
 
+    pub async fn lookup_guild_by_id(
+        &self,
+        site: WarcraftLogsSite,
+        guild_id: i64,
+    ) -> Result<Option<WarcraftLogsGuild>> {
+        let data: GuildLookupData = self
+            .graphql(site, GUILD_BY_ID_QUERY, GuildByIdVariables { id: guild_id })
+            .await?;
+
+        Ok(data.guild_data.guild)
+    }
+
     pub async fn reports_since(
         &self,
+        site: WarcraftLogsSite,
         guild_id: i64,
         start_time_ms: i64,
         end_time_ms: i64,
@@ -236,6 +341,7 @@ impl WarcraftLogsClient {
         let rate_limit = loop {
             let data: GuildReportsData = self
                 .graphql(
+                    site,
                     GUILD_REPORTS_QUERY,
                     GuildReportsVariables {
                         guild_id,
@@ -264,9 +370,15 @@ impl WarcraftLogsClient {
         })
     }
 
-    pub async fn recent_reports(&self, guild_id: i64, limit: i32) -> Result<ReportDiscovery> {
+    pub async fn recent_reports(
+        &self,
+        site: WarcraftLogsSite,
+        guild_id: i64,
+        limit: i32,
+    ) -> Result<ReportDiscovery> {
         let data: GuildReportsData = self
             .graphql(
+                site,
                 GUILD_REPORTS_QUERY,
                 GuildReportsVariables {
                     guild_id,
@@ -287,9 +399,13 @@ impl WarcraftLogsClient {
         })
     }
 
-    pub async fn report_fights(&self, code: &str) -> Result<WarcraftLogsReportDetails> {
+    pub async fn report_fights(
+        &self,
+        site: WarcraftLogsSite,
+        code: &str,
+    ) -> Result<WarcraftLogsReportDetails> {
         let data: ReportFightsData = self
-            .graphql(REPORT_FIGHTS_QUERY, ReportCodeVariables { code })
+            .graphql(site, REPORT_FIGHTS_QUERY, ReportCodeVariables { code })
             .await?;
 
         data.report_data
@@ -297,9 +413,18 @@ impl WarcraftLogsClient {
             .ok_or_else(|| anyhow!("Warcraft Logs report {code} was not found"))
     }
 
-    pub async fn kill_summary(&self, code: &str, fight_id: i32) -> Result<KillSummary> {
+    pub async fn kill_summary(
+        &self,
+        site: WarcraftLogsSite,
+        code: &str,
+        fight_id: i32,
+    ) -> Result<KillSummary> {
         let data: KillSummaryData = self
-            .graphql(KILL_SUMMARY_QUERY, KillSummaryVariables { code, fight_id })
+            .graphql(
+                site,
+                KILL_SUMMARY_QUERY,
+                KillSummaryVariables { code, fight_id },
+            )
             .await?;
         let report = data
             .report_data
@@ -313,19 +438,24 @@ impl WarcraftLogsClient {
         })
     }
 
-    async fn graphql<V, D>(&self, query: &str, variables: V) -> Result<D>
+    async fn graphql<V, D>(&self, site: WarcraftLogsSite, query: &str, variables: V) -> Result<D>
     where
         V: Serialize,
         D: DeserializeOwned,
     {
         let request = GraphQlRequest { query, variables };
+        let graphql_url = self
+            .inner
+            .graphql_url_override
+            .as_deref()
+            .unwrap_or_else(|| site.graphql_url());
 
         for attempt in 0..=1 {
-            let token = self.access_token().await?;
+            let token = self.access_token(site).await?;
             let response = self
                 .inner
                 .http
-                .post(&self.inner.graphql_url)
+                .post(graphql_url)
                 .bearer_auth(token)
                 .header(reqwest::header::ACCEPT, "application/json")
                 .json(&request)
@@ -334,7 +464,7 @@ impl WarcraftLogsClient {
                 .context("failed to call Warcraft Logs GraphQL API")?;
 
             if response.status() == StatusCode::UNAUTHORIZED && attempt == 0 {
-                *self.inner.token.write().await = None;
+                self.inner.tokens.write().await.remove(&site);
                 continue;
             }
 
@@ -367,27 +497,32 @@ impl WarcraftLogsClient {
         unreachable!("GraphQL authentication retries are bounded")
     }
 
-    async fn access_token(&self) -> Result<String> {
+    async fn access_token(&self, site: WarcraftLogsSite) -> Result<String> {
         {
-            let cached = self.inner.token.read().await;
-            if let Some(token) = cached.as_ref()
+            let cached = self.inner.tokens.read().await;
+            if let Some(token) = cached.get(&site)
                 && token.expires_at > Instant::now() + TOKEN_EXPIRY_MARGIN
             {
                 return Ok(token.access_token.clone());
             }
         }
 
-        let mut cached = self.inner.token.write().await;
-        if let Some(token) = cached.as_ref()
+        let mut cached = self.inner.tokens.write().await;
+        if let Some(token) = cached.get(&site)
             && token.expires_at > Instant::now() + TOKEN_EXPIRY_MARGIN
         {
             return Ok(token.access_token.clone());
         }
 
+        let oauth_url = self
+            .inner
+            .oauth_url_override
+            .as_deref()
+            .unwrap_or_else(|| site.oauth_url());
         let response = self
             .inner
             .http
-            .post(&self.inner.oauth_url)
+            .post(oauth_url)
             .basic_auth(&self.inner.client_id, Some(&self.inner.client_secret))
             .form(&[("grant_type", "client_credentials")])
             .send()
@@ -410,10 +545,13 @@ impl WarcraftLogsClient {
 
         let expires_in = Duration::from_secs(token.expires_in.max(1));
         let access_token = token.access_token;
-        *cached = Some(CachedToken {
-            access_token: access_token.clone(),
-            expires_at: Instant::now() + expires_in,
-        });
+        cached.insert(
+            site,
+            CachedToken {
+                access_token: access_token.clone(),
+                expires_at: Instant::now() + expires_in,
+            },
+        );
 
         Ok(access_token)
     }
@@ -449,6 +587,11 @@ struct GuildLookupVariables<'a> {
     name: &'a str,
     server_slug: &'a str,
     server_region: &'a str,
+}
+
+#[derive(Serialize)]
+struct GuildByIdVariables {
+    id: i64,
 }
 
 #[derive(Deserialize)]
@@ -718,7 +861,7 @@ fn parse_death_count(summary: &Value, deaths: &Value) -> Result<Option<u64>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        RateLimitInfo, WarcraftLogsClient, WarcraftLogsConfig, WarcraftLogsFight,
+        RateLimitInfo, WarcraftLogsClient, WarcraftLogsConfig, WarcraftLogsFight, WarcraftLogsSite,
         parse_death_count, parse_metric_entries,
     };
     use serde_json::{Value, json};
@@ -765,6 +908,26 @@ mod tests {
                 ..fight
             }
             .is_completed_boss_kill()
+        );
+    }
+
+    #[test]
+    fn routes_retail_and_classic_to_matching_hosts() {
+        assert_eq!(
+            WarcraftLogsSite::Retail.graphql_url(),
+            "https://www.warcraftlogs.com/api/v2/client"
+        );
+        assert_eq!(
+            WarcraftLogsSite::Classic.graphql_url(),
+            "https://classic.warcraftlogs.com/api/v2/client"
+        );
+        assert_eq!(
+            WarcraftLogsSite::Classic.oauth_url(),
+            "https://classic.warcraftlogs.com/oauth/token"
+        );
+        assert_eq!(
+            WarcraftLogsSite::Classic.report_url("abc"),
+            "https://classic.warcraftlogs.com/reports/abc"
         );
     }
 
@@ -886,7 +1049,10 @@ mod tests {
         )
         .unwrap();
 
-        let discovery = client.reports_since(42, 0, 10_000).await.unwrap();
+        let discovery = client
+            .reports_since(WarcraftLogsSite::Retail, 42, 0, 10_000)
+            .await
+            .unwrap();
         assert_eq!(
             discovery
                 .reports
@@ -966,7 +1132,10 @@ mod tests {
         )
         .unwrap();
 
-        let discovery = client.recent_reports(42, 3).await.unwrap();
+        let discovery = client
+            .recent_reports(WarcraftLogsSite::Retail, 42, 3)
+            .await
+            .unwrap();
 
         assert_eq!(
             discovery
@@ -980,6 +1149,56 @@ mod tests {
         assert!(requests[1].contains("\"startTime\":null"));
         assert!(requests[1].contains("\"endTime\":null"));
         assert!(requests[1].contains("\"limit\":3"));
+    }
+
+    #[tokio::test]
+    async fn looks_up_classic_guilds_by_id() {
+        let responses = vec![
+            json!({
+                "access_token": "test-token",
+                "expires_in": 3600
+            })
+            .to_string(),
+            json!({
+                "data": {
+                    "guildData": {
+                        "guild": {
+                            "id": 484,
+                            "name": "Progress",
+                            "server": {
+                                "name": "Benediction",
+                                "slug": "benediction",
+                                "region": {
+                                    "compactName": "US",
+                                    "slug": "us"
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        ];
+        let (base_url, requests) = start_json_server(responses).await;
+        let config = test_config();
+        let client = WarcraftLogsClient::with_endpoints(
+            &config,
+            &format!("{base_url}/oauth"),
+            &format!("{base_url}/graphql"),
+        )
+        .unwrap();
+
+        let guild = client
+            .lookup_guild_by_id(WarcraftLogsSite::Classic, 484)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(guild.id, 484);
+        assert_eq!(guild.name, "Progress");
+        let requests = requests.await.unwrap();
+        assert!(requests[1].contains("GuildById"));
+        assert!(requests[1].contains("\"id\":484"));
     }
 
     #[tokio::test]
@@ -1005,7 +1224,7 @@ mod tests {
         .unwrap();
 
         let error = client
-            .lookup_guild("Guild", "realm", "US")
+            .lookup_guild(WarcraftLogsSite::Retail, "Guild", "realm", "US")
             .await
             .unwrap_err();
         assert!(error.to_string().contains("guild lookup failed"));

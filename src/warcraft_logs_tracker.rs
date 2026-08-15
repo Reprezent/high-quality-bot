@@ -90,7 +90,12 @@ async fn process_subscription(
     let now_ms = chrono::Utc::now().timestamp_millis();
     let start_time_ms = discovery_start_time_ms(subscription.discovery_cursor_ms, now_ms);
     let discovery = client
-        .reports_since(subscription.wcl_guild_id, start_time_ms, now_ms)
+        .reports_since(
+            subscription.wcl_site,
+            subscription.wcl_guild_id,
+            start_time_ms,
+            now_ms,
+        )
         .await
         .with_context(|| {
             format!(
@@ -110,7 +115,7 @@ async fn process_subscription(
         .context("failed to persist discovered Warcraft Logs reports")?;
 
     let mut had_item_error = announce_reports(pool, discord_http, subscription.id).await?;
-    had_item_error |= inspect_reports(pool, client, subscription.id).await?;
+    had_item_error |= inspect_reports(pool, client, subscription.id, subscription.wcl_site).await?;
     had_item_error |= announce_fights(pool, client, discord_http, subscription.id).await?;
 
     if had_item_error {
@@ -186,12 +191,13 @@ async fn inspect_reports(
     pool: &PgPool,
     client: &WarcraftLogsClient,
     subscription_id: i64,
+    site: crate::warcraft_logs::WarcraftLogsSite,
 ) -> Result<bool> {
     let reports = db::list_wcl_reports_to_inspect(pool, subscription_id).await?;
     let mut had_error = false;
     for report in reports {
         let result = async {
-            let details = client.report_fights(&report.code).await?;
+            let details = client.report_fights(site, &report.code).await?;
             let report_end_time_ms = details.end_time.map(absolute_milliseconds).transpose()?;
             let fights = fight_records_from_api(&details.fights)?;
 
@@ -240,7 +246,7 @@ async fn announce_fights(
     for fight in fights {
         let result = async {
             let summary = client
-                .kill_summary(&fight.report_code, fight.fight.fight_id)
+                .kill_summary(fight.wcl_site, &fight.report_code, fight.fight.fight_id)
                 .await?;
             let channel_id = parse_channel_id(&fight.discord_channel_id)?;
             channel_id
