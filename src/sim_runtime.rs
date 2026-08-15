@@ -1,19 +1,14 @@
 use anyhow::{Context, Result, anyhow};
 use prost::Message;
-use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
-use serde_json::Value;
 use sqlx::PgPool;
 use std::collections::HashSet;
-use std::sync::OnceLock;
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
 use crate::db;
-use crate::mop_proto::mop::{
-    AplRotation, AsyncApiResult, Debuffs, PartyBuffs, ProgressMetrics, Raid, RaidBuffs,
-    RaidSimRequest, SimType, player,
-};
+use crate::mop_proto::mop::{AsyncApiResult, ProgressMetrics, Raid, RaidSimRequest, SimType};
 use crate::parsing::build_player_from_run;
+use crate::sim_request_codec::{parse_raid_sim_request, protojson_message_to_value};
 use crate::sim_runtime_targets::{
     default_mop_encounter, default_mop_raid, default_mop_sim_options,
 };
@@ -459,13 +454,15 @@ fn maybe_log_request_json(run_id: Uuid, request: &RaidSimRequest) {
             let normalized = value.trim().to_ascii_lowercase();
             normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on"
         })
-        .unwrap_or(true);
+        .unwrap_or(false);
 
     if !enabled {
         return;
     }
 
-    match serde_json::to_string_pretty(&request_to_json(request)) {
+    match protojson_message_to_value("proto.RaidSimRequest", request)
+        .and_then(|value| serde_json::to_string_pretty(&value).map_err(Into::into))
+    {
         Ok(json) => {
             tracing::info!(run_id = %run_id, request_json = %json, "sending raid sim request")
         }
@@ -473,6 +470,20 @@ fn maybe_log_request_json(run_id: Uuid, request: &RaidSimRequest) {
             tracing::warn!(run_id = %run_id, error = ?error, "failed to serialize raid sim request json")
         }
     }
+}
+
+fn build_default_request(run: &db::SimulationRun, run_id: Uuid) -> Result<RaidSimRequest> {
+    let mapped_player = build_player_from_run(run)?;
+    let mut raid = default_mop_raid();
+    raid.parties[0].players[0] = mapped_player;
+
+    Ok(RaidSimRequest {
+        request_id: run_id.to_string(),
+        raid: Some(raid),
+        encounter: Some(default_mop_encounter()),
+        sim_options: Some(default_mop_sim_options(run_id)),
+        r#type: SimType::Raid as i32,
+    })
 }
 
 pub async fn run_async_simulation(
@@ -489,66 +500,29 @@ pub async fn run_async_simulation(
         .await?
         .ok_or_else(|| anyhow!("simulation run not found: {}", run_id))?;
 
-    let mapped_player = build_player_from_run(&run)?;
-    let mut raid = default_mop_raid();
-
-    if let Some(raid_buffs_payload) = extract_raid_buffs_payload(&run.gear_payload) {
-        match parse_protojson_message::<RaidBuffs>("proto.RaidBuffs", raid_buffs_payload) {
-            Ok(raid_buffs) => {
-                raid.buffs = Some(raid_buffs);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    run_id = %run_id,
-                    error = ?error,
-                    "failed to parse raidBuffs from payload; using default raid buffs"
-                );
-            }
+    let mut request = match run.normalized_request.as_ref() {
+        Some(payload) => parse_raid_sim_request(payload).with_context(|| {
+            format!("failed to load normalized simulation request for run {run_id}")
+        })?,
+        None => {
+            let request = build_default_request(&run, run_id)?;
+            let normalized_request = protojson_message_to_value("proto.RaidSimRequest", &request)?;
+            let sim_options = request
+                .sim_options
+                .as_ref()
+                .ok_or_else(|| anyhow!("default simulation request is missing sim options"))?;
+            db::update_simulation_run_request(
+                &pool,
+                run_id,
+                &normalized_request,
+                sim_options.random_seed,
+                sim_options.iterations,
+            )
+            .await?;
+            request
         }
-    }
-
-    if let Some(debuffs_payload) = extract_debuffs_payload(&run.gear_payload) {
-        match parse_protojson_message::<Debuffs>("proto.Debuffs", debuffs_payload) {
-            Ok(debuffs) => {
-                raid.debuffs = Some(debuffs);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    run_id = %run_id,
-                    error = ?error,
-                    "failed to parse debuffs from payload; using default debuffs"
-                );
-            }
-        }
-    }
-
-    if let Some(party_buffs_payload) = extract_party_buffs_payload(&run.gear_payload) {
-        match parse_protojson_message::<PartyBuffs>("proto.PartyBuffs", party_buffs_payload) {
-            Ok(party_buffs) => {
-                if let Some(party) = raid.parties.get_mut(0) {
-                    party.buffs = Some(party_buffs);
-                }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    run_id = %run_id,
-                    error = ?error,
-                    "failed to parse partyBuffs from payload; using default party buffs"
-                );
-            }
-        }
-    }
-
-    raid.parties[0].players[0] = mapped_player;
-
-    let request = RaidSimRequest {
-        request_id: request_id.clone(),
-        raid: Some(raid),
-        encounter: Some(default_mop_encounter()),
-        sim_options: Some(default_mop_sim_options(run_id)),
-        r#type: SimType::Raid as i32,
-        ..Default::default()
     };
+    request.request_id = request_id.clone();
 
     if let Err(error) = validate_sim_request_payload(&request) {
         db::update_simulation_run_status(&pool, run_id, "failed").await?;
@@ -773,5 +747,112 @@ pub async fn run_async_simulation(
         }
 
         sleep(Duration::from_secs(1)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use serde_json::Value;
+
+    #[tokio::test]
+    #[ignore = "requires a running WoWSims async API at WOWSIMS_API_BASE_URL"]
+    async fn submits_a_defaulted_gear_profile_request_to_the_async_api() {
+        let base_url = std::env::var("WOWSIMS_API_BASE_URL")
+            .expect("WOWSIMS_API_BASE_URL must point at a running simulator");
+        let payload: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/gear-profile.json"))
+                .expect("fixture must be valid JSON");
+        let run = db::SimulationRun {
+            run_id: Uuid::new_v4(),
+            discord_user_id: "smoke-test".to_string(),
+            class: "mage".to_string(),
+            spec: "arcane".to_string(),
+            gear_payload: payload,
+            input_format: "gear-json".to_string(),
+            upstream_revision: None,
+            normalized_request: None,
+            effective_random_seed: None,
+            effective_iterations: None,
+            raid_members: Vec::new(),
+            status: "queued".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let mut request =
+            build_default_request(&run, run.run_id).expect("fixture must build a default request");
+        request.sim_options.as_mut().unwrap().iterations = 1;
+        let client = reqwest::Client::new();
+
+        let response = client
+            .post(format!(
+                "{base_url}/raidSimAsync?requestId={}",
+                request.request_id
+            ))
+            .header("content-type", "application/x-protobuf")
+            .body(request.encode_to_vec())
+            .send()
+            .await
+            .expect("async API request must complete");
+        assert!(
+            response.status().is_success(),
+            "raidSimAsync returned {}",
+            response.status()
+        );
+        let async_result = AsyncApiResult::decode(
+            response
+                .bytes()
+                .await
+                .expect("async API response body must be readable")
+                .as_ref(),
+        )
+        .expect("async API response must be protobuf");
+
+        for _ in 0..120 {
+            let response = client
+                .post(format!("{base_url}/asyncProgress"))
+                .header("content-type", "application/x-protobuf")
+                .body(async_result.encode_to_vec())
+                .send()
+                .await
+                .expect("async progress request must complete");
+
+            if response.status().as_u16() == 204 {
+                sleep(Duration::from_millis(250)).await;
+                continue;
+            }
+
+            assert!(
+                response.status().is_success(),
+                "asyncProgress returned {}",
+                response.status()
+            );
+            let progress = ProgressMetrics::decode(
+                response
+                    .bytes()
+                    .await
+                    .expect("async progress body must be readable")
+                    .as_ref(),
+            )
+            .expect("async progress body must be protobuf");
+
+            if let Some(result) = progress.final_raid_result {
+                let error_message = result
+                    .error
+                    .as_ref()
+                    .map(|error| error.message.as_str())
+                    .unwrap_or("no simulator error");
+                assert!(
+                    result.error.is_none(),
+                    "simulator rejected normalized request: {error_message}"
+                );
+                return;
+            }
+
+            sleep(Duration::from_millis(250)).await;
+        }
+
+        panic!("simulator did not return final metrics within 30 seconds");
     }
 }

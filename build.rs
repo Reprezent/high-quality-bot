@@ -3,11 +3,14 @@ use std::path::PathBuf;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+const MOP_UPSTREAM_REVISION: &str = "325d83c7bb0b2890795bdd21146d60988bb8869c";
+
 fn main() {
     let build_timestamp = OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .expect("failed to format build timestamp");
     println!("cargo:rustc-env=BUILD_TIMESTAMP_UTC={build_timestamp}");
+    println!("cargo:rustc-env=MOP_UPSTREAM_REVISION={MOP_UPSTREAM_REVISION}");
 
     println!("cargo:rerun-if-env-changed=MOP_PROTO_DIR");
 
