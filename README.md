@@ -15,6 +15,7 @@ A Discord bot written in Rust that runs World of Warcraft simulations via slash 
 | `/warcraftlogs track <channel> [guild_link] [guild] [server] [region] [section]` | Post new public reports and boss kills for a Warcraft Logs guild. Requires Manage Server. |
 | `/warcraftlogs status` | Show this server's Warcraft Logs tracker status. |
 | `/warcraftlogs history` | Show the tracked guild's three most recent public reports. |
+| `/warcraftlogs summary <report_link>` | Preview the kill-summary embed for a report's selected or latest completed boss kill. |
 | `/warcraftlogs untrack` | Stop tracking Warcraft Logs in this server. Requires Manage Server. |
 
 ### Examples
@@ -29,6 +30,7 @@ A Discord bot written in Rust that runs World of Warcraft simulations via slash 
 /warcraftlogs track channel:#raid-logs guild_link:https://classic.warcraftlogs.com/guild/id/484
 /warcraftlogs status
 /warcraftlogs history
+/warcraftlogs summary report_link:https://classic.warcraftlogs.com/reports/REPORTCODE#fight=7&type=summary
 ```
 
 ### Running a gear profile
@@ -156,7 +158,7 @@ The command accepts guild pages from `classic.warcraftlogs.com` and `www.warcraf
 
 The integration uses bot-level client credentials and intentionally supports **public guild reports only** on the Classic and Retail Warcraft Logs sections. Private/unlisted reports and per-user Warcraft Logs OAuth are not supported. Warcraft Logs documents report-table JSON as non-frozen; if a summary payload changes, the bot records and retries the failed summary instead of posting invented metrics.
 
-Use `/warcraftlogs status` to see the destination and latest polling health. Use `/warcraftlogs history` to query Warcraft Logs for the tracked guild's three newest public reports, including reports older than the local tracking baseline. Use `/warcraftlogs untrack` to remove the tracker and its stored report/fight state.
+Use `/warcraftlogs status` to see the destination and latest polling health. Use `/warcraftlogs history` to query Warcraft Logs for the tracked guild's three newest public reports, including reports older than the local tracking baseline. Use `/warcraftlogs summary` with any public Classic or Retail report link to preview the same boss-kill embed the tracker posts; a numeric `fight` selector chooses that completed kill, while a plain report link or `fight=last` uses the latest completed kill. Use `/warcraftlogs untrack` to remove the tracker and its stored report/fight state.
 
 ## Using `wowsims/mop` Protobufs in Rust
 

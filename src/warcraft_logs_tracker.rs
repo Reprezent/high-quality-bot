@@ -386,7 +386,7 @@ pub(crate) fn fight_records_from_api(
         .collect()
 }
 
-fn absolute_milliseconds(value: f64) -> Result<i64> {
+pub(crate) fn absolute_milliseconds(value: f64) -> Result<i64> {
     milliseconds(value, "absolute")
 }
 

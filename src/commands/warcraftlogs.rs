@@ -1,6 +1,6 @@
 use crate::{
     Context,
-    db::{self, NewWclSubscription},
+    db::{self, NewWclSubscription, WclFightRecord, WclPendingFight},
     warcraft_logs::{WarcraftLogsReport, WarcraftLogsSite},
     warcraft_logs_discord, warcraft_logs_tracker,
 };
@@ -17,7 +17,7 @@ const BASELINE_LOOKBACK_HOURS: i64 = 24;
 #[poise::command(
     slash_command,
     guild_only,
-    subcommands("track", "untrack", "status", "history")
+    subcommands("track", "untrack", "status", "history", "summary")
 )]
 pub async fn warcraftlogs(_: Context<'_>) -> Result<()> {
     Ok(())
@@ -67,6 +67,13 @@ impl GuildLocator {
             Self::Identity { .. } => "guild_identity",
         }
     }
+}
+
+#[derive(Debug, PartialEq)]
+struct ReportLocator {
+    site: WarcraftLogsSite,
+    code: String,
+    fight_id: Option<i32>,
 }
 
 /// Track a public Warcraft Logs guild in this Discord server.
@@ -497,6 +504,129 @@ pub async fn history(ctx: Context<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Preview the boss-kill summary embed for a Warcraft Logs report.
+#[poise::command(slash_command, guild_only)]
+pub async fn summary(
+    ctx: Context<'_>,
+    #[description = "Classic or Retail Warcraft Logs report URL"] report_link: String,
+) -> Result<()> {
+    ctx.defer_ephemeral().await?;
+    let Some(client) = ctx.data().wcl_client.as_ref() else {
+        ctx.say(
+            "Warcraft Logs is not configured. Set the bot's `WARCRAFT_LOGS_CLIENT_ID` and \
+             `WARCRAFT_LOGS_CLIENT_SECRET` environment variables.",
+        )
+        .await?;
+        return Ok(());
+    };
+    let locator = match parse_report_link(&report_link) {
+        Ok(locator) => locator,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                user_id = ctx.author().id.get(),
+                "Warcraft Logs summary link is invalid"
+            );
+            ctx.say(format!("I could not use that report link: {error}"))
+                .await?;
+            return Ok(());
+        }
+    };
+    tracing::info!(
+        user_id = ctx.author().id.get(),
+        wcl_site = locator.site.slug(),
+        report_code = %locator.code,
+        requested_fight_id = locator.fight_id,
+        "Loading Warcraft Logs summary preview"
+    );
+
+    let details = match client.report_fights(locator.site, &locator.code).await {
+        Ok(details) => details,
+        Err(error) => {
+            tracing::error!(
+                error = ?error,
+                wcl_site = locator.site.slug(),
+                report_code = %locator.code,
+                "Failed to load Warcraft Logs report for summary preview"
+            );
+            ctx.say("Warcraft Logs could not load that report. Check that it is public and retry.")
+                .await?;
+            return Ok(());
+        }
+    };
+    let fights = warcraft_logs_tracker::fight_records_from_api(&details.fights)?;
+    let Some(fight) = select_summary_fight(&fights, locator.fight_id) else {
+        let message = if let Some(fight_id) = locator.fight_id {
+            format!(
+                "Fight **{fight_id}** is not a completed boss kill in that report. \
+                 Use a completed-kill link or omit the fight selector."
+            )
+        } else {
+            "That report does not contain a completed boss kill to summarize.".to_owned()
+        };
+        ctx.say(message).await?;
+        return Ok(());
+    };
+    let kill_summary = match client
+        .kill_summary(locator.site, &locator.code, fight.fight_id)
+        .await
+    {
+        Ok(summary) => summary,
+        Err(error) => {
+            tracing::error!(
+                error = ?error,
+                wcl_site = locator.site.slug(),
+                report_code = %locator.code,
+                fight_id = fight.fight_id,
+                "Failed to load Warcraft Logs summary tables"
+            );
+            ctx.say(
+                "Warcraft Logs could not build that fight summary yet. The report tables may \
+                 still be processing; please try again shortly.",
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+    let preview = WclPendingFight {
+        subscription_id: 0,
+        discord_channel_id: ctx.channel_id().to_string(),
+        wcl_site: locator.site,
+        wcl_guild_name: details
+            .guild
+            .as_ref()
+            .map_or_else(|| "Raid group".to_owned(), |guild| guild.name.clone()),
+        report_code: details.code,
+        report_title: details.title,
+        report_start_time_ms: warcraft_logs_tracker::absolute_milliseconds(details.start_time)?,
+        fight: fight.clone(),
+    };
+    ctx.send(
+        poise::CreateReply::default()
+            .embed(warcraft_logs_discord::kill_embed(&preview, &kill_summary))
+            .ephemeral(true),
+    )
+    .await?;
+    tracing::info!(
+        user_id = ctx.author().id.get(),
+        wcl_site = locator.site.slug(),
+        report_code = %preview.report_code,
+        fight_id = preview.fight.fight_id,
+        "Rendered Warcraft Logs summary preview"
+    );
+    Ok(())
+}
+
+fn select_summary_fight(
+    fights: &[WclFightRecord],
+    requested_fight_id: Option<i32>,
+) -> Option<&WclFightRecord> {
+    match requested_fight_id {
+        Some(fight_id) => fights.iter().find(|fight| fight.fight_id == fight_id),
+        None => fights.iter().max_by_key(|fight| fight.end_time_ms),
+    }
+}
+
 fn format_recent_reports(
     site: WarcraftLogsSite,
     guild_name: &str,
@@ -603,6 +733,70 @@ fn build_guild_locator(
         name: guild,
         server_slug,
         region: region.to_owned(),
+    })
+}
+
+fn parse_report_link(value: &str) -> Result<ReportLocator> {
+    let url = Url::parse(value.trim()).context("report_link must be a valid URL")?;
+    if !matches!(url.scheme(), "http" | "https") {
+        bail!("report_link must use http or https");
+    }
+    let host = url
+        .host_str()
+        .context("report_link does not contain a host")?;
+    let site = WarcraftLogsSite::from_host(host).with_context(|| {
+        format!(
+            "unsupported Warcraft Logs host {host:?}; use www.warcraftlogs.com or classic.warcraftlogs.com"
+        )
+    })?;
+    let segments = url
+        .path_segments()
+        .context("report_link does not contain a report path")?
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    if segments.first().copied() != Some("reports") {
+        bail!("report_link must point to a Warcraft Logs report page");
+    }
+    let code = segments
+        .get(1)
+        .context("report_link is missing its report code")?
+        .to_string();
+    if !code
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric())
+    {
+        bail!("report_link contains an invalid report code");
+    }
+
+    let fight_value = url
+        .fragment()
+        .and_then(|fragment| {
+            fragment.split('&').find_map(|part| {
+                let (key, value) = part.split_once('=')?;
+                (key == "fight").then(|| value.to_owned())
+            })
+        })
+        .or_else(|| {
+            url.query_pairs()
+                .find_map(|(key, value)| (key == "fight").then(|| value.into_owned()))
+        });
+    let fight_id = match fight_value.as_deref() {
+        None | Some("last") => None,
+        Some(value) => {
+            let fight_id = value
+                .parse::<i32>()
+                .context("report_link contains an unsupported fight selector")?;
+            if fight_id <= 0 {
+                bail!("report_link fight ID must be positive");
+            }
+            Some(fight_id)
+        }
+    };
+
+    Ok(ReportLocator {
+        site,
+        code,
+        fight_id,
     })
 }
 
@@ -718,9 +912,10 @@ fn normalize_server_slug(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        GuildLocator, build_guild_locator, format_recent_reports, normalize_region,
-        normalize_server_slug, parse_guild_link,
+        GuildLocator, ReportLocator, build_guild_locator, format_recent_reports, normalize_region,
+        normalize_server_slug, parse_guild_link, parse_report_link, select_summary_fight,
     };
+    use crate::db::WclFightRecord;
     use crate::warcraft_logs::{WarcraftLogsReport, WarcraftLogsSite, WarcraftLogsZone};
 
     #[test]
@@ -835,5 +1030,59 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn parses_classic_and_retail_report_links() {
+        assert_eq!(
+            parse_report_link(
+                "https://classic.warcraftlogs.com/reports/AbC123#fight=7&type=summary"
+            )
+            .unwrap(),
+            ReportLocator {
+                site: WarcraftLogsSite::Classic,
+                code: "AbC123".to_owned(),
+                fight_id: Some(7),
+            }
+        );
+        assert_eq!(
+            parse_report_link("https://www.warcraftlogs.com/reports/Def456#fight=last").unwrap(),
+            ReportLocator {
+                site: WarcraftLogsSite::Retail,
+                code: "Def456".to_owned(),
+                fight_id: None,
+            }
+        );
+        assert!(parse_report_link("https://classic.warcraftlogs.com/guild/id/484").is_err());
+        assert!(
+            parse_report_link("https://classic.warcraftlogs.com/reports/AbC123#fight=foo").is_err()
+        );
+    }
+
+    #[test]
+    fn selects_requested_or_latest_completed_fight() {
+        let fights = vec![fight_record(1, 10_000), fight_record(2, 30_000)];
+
+        assert_eq!(
+            select_summary_fight(&fights, Some(1)).map(|fight| fight.fight_id),
+            Some(1)
+        );
+        assert_eq!(
+            select_summary_fight(&fights, None).map(|fight| fight.fight_id),
+            Some(2)
+        );
+        assert!(select_summary_fight(&fights, Some(99)).is_none());
+    }
+
+    fn fight_record(fight_id: i32, end_time_ms: i64) -> WclFightRecord {
+        WclFightRecord {
+            fight_id,
+            boss_name: format!("Boss {fight_id}"),
+            difficulty: Some(5),
+            raid_size: Some(20),
+            average_item_level: Some(700.0),
+            start_time_ms: 0,
+            end_time_ms,
+        }
     }
 }

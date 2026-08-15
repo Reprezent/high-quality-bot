@@ -91,6 +91,7 @@ query ReportFights($code: String!) {
       startTime
       endTime
       revision
+      guild { name }
       fights(killType: Encounters) {
         id
         name
@@ -728,7 +729,13 @@ pub struct WarcraftLogsReportDetails {
     pub start_time: f64,
     pub end_time: Option<f64>,
     pub revision: i32,
+    pub guild: Option<WarcraftLogsReportGuild>,
     pub fights: Vec<WarcraftLogsFight>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct WarcraftLogsReportGuild {
+    pub name: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -736,6 +743,7 @@ pub struct WarcraftLogsReportDetails {
 pub struct WarcraftLogsFight {
     pub id: i32,
     pub name: String,
+    #[serde(rename = "encounterID")]
     pub encounter_id: i32,
     pub kill: bool,
     pub in_progress: bool,
@@ -1226,6 +1234,61 @@ mod tests {
         let requests = requests.await.unwrap();
         assert!(requests[1].contains("GuildById"));
         assert!(requests[1].contains("\"id\":484"));
+    }
+
+    #[tokio::test]
+    async fn loads_report_guild_and_completed_fights_for_preview() {
+        let responses = vec![
+            json!({
+                "access_token": "test-token",
+                "expires_in": 3600
+            })
+            .to_string(),
+            json!({
+                "data": {
+                    "reportData": {
+                        "report": {
+                            "code": "AbC123",
+                            "title": "Raid Night",
+                            "startTime": 1000.0,
+                            "endTime": 90000.0,
+                            "revision": 0,
+                            "guild": {"name": "Progress"},
+                            "fights": [{
+                                "id": 7,
+                                "name": "Test Boss",
+                                "encounterID": 123,
+                                "kill": true,
+                                "inProgress": false,
+                                "difficulty": 5,
+                                "size": 20,
+                                "startTime": 10000.0,
+                                "endTime": 70000.0,
+                                "averageItemLevel": 700.0
+                            }]
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        ];
+        let (base_url, requests) = start_json_server(responses).await;
+        let config = test_config();
+        let client = WarcraftLogsClient::with_endpoints(
+            &config,
+            &format!("{base_url}/oauth"),
+            &format!("{base_url}/graphql"),
+        )
+        .unwrap();
+
+        let report = client
+            .report_fights(WarcraftLogsSite::Classic, "AbC123")
+            .await
+            .unwrap();
+
+        assert_eq!(report.guild.unwrap().name, "Progress");
+        assert!(report.fights[0].is_completed_boss_kill());
+        assert!(requests.await.unwrap()[1].contains("ReportFights"));
     }
 
     #[tokio::test]
