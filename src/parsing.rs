@@ -15,7 +15,7 @@ use crate::mop_proto::mop::{
     EnhancementShaman, EquipmentSpec, FeralDruid, FireMage, FrostDeathKnight, FrostMage,
     FuryWarrior, Glyphs, GuardianDruid, HolyPaladin, HolyPriest, HunterOptions, ItemLevelState,
     ItemSpec, ItemSwap, MageArmor, MageOptions, MarksmanshipHunter, MistweaverMonk, MonkOptions,
-    PaladinOptions, Player, PriestOptions, ProtectionPaladin, ProtectionWarrior, Race,
+    PaladinOptions, Player, PriestOptions, Profession, ProtectionPaladin, ProtectionWarrior, Race,
     RestorationDruid, RestorationShaman, RetributionPaladin, RogueOptions, ShadowPriest,
     ShamanOptions, SubtletyRogue, SurvivalHunter, UnholyDeathKnight, WarlockOptions,
     WarriorOptions, WindwalkerMonk, affliction_warlock, arcane_mage, arms_warrior,
@@ -1483,9 +1483,7 @@ pub fn build_player_from_payload(
 ) -> Result<Player> {
     let class = class.trim().to_lowercase();
     let spec = spec.trim().to_lowercase();
-    let (class_id, default_race_id, spec_oneof) = resolve_player_spec(&class, &spec)?;
-    let spec_oneof = with_default_spec_options(spec_oneof);
-    let spec_oneof = with_spec_specific_defaults(spec_oneof);
+    let (class_id, default_race_id, expected_spec_oneof) = resolve_player_spec(&class, &spec)?;
 
     let player_name = string_field(payload, "name")
         .map(str::trim)
@@ -1518,7 +1516,7 @@ pub fn build_player_from_payload(
         with_spec_specific_defaults(with_default_spec_options(spec_oneof))
     };
 
-    if let Some(mut player) = load_full_player_from_payload(&run.gear_payload) {
+    if let Some(mut player) = load_full_player_from_payload(payload) {
         let spec_oneof = match player.spec.take() {
             Some(spec_oneof)
                 if std::mem::discriminant(&spec_oneof)
@@ -1532,24 +1530,24 @@ pub fn build_player_from_payload(
         player.api_version = PLAYER_API_VERSION;
         player.class = class_id;
         if player.race == Race::Unknown as i32 {
-            player.race = fallback_race_id;
+            player.race = default_race_id;
         }
         if player.name.trim().is_empty() {
             player.name = player_name;
         }
         if player.equipment.is_none() {
-            player.equipment = Some(parse_equipment_spec(&run.gear_payload));
+            player.equipment = Some(parse_equipment_spec(payload));
         } else if let Some(equipment) = player.equipment.take() {
             player.equipment = Some(normalize_equipment_spec(equipment));
         }
         if player.glyphs.is_none() {
-            player.glyphs = Some(parse_glyphs(&run.gear_payload));
+            player.glyphs = Some(parse_glyphs(payload));
         }
         if let Some(item_swap) = player.item_swap.take() {
             player.item_swap = Some(normalize_item_swap(item_swap));
         }
         if player.talents_string.trim().is_empty() {
-            player.talents_string = parse_talents_string(&run.gear_payload);
+            player.talents_string = parse_talents_string(payload);
         }
         if player.rotation.is_none() {
             player.rotation = rotation;
@@ -1576,7 +1574,7 @@ pub fn build_player_from_payload(
 }
 
 #[cfg(test)]
-mod tests {
+mod full_player_tests {
     use super::*;
     use crate::mop_proto::mop::Profession;
     use chrono::Utc;
@@ -1592,6 +1590,11 @@ mod tests {
             class: "mage".to_string(),
             spec: "arcane".to_string(),
             gear_payload: payload,
+            input_format: "json".to_string(),
+            upstream_revision: None,
+            normalized_request: None,
+            effective_random_seed: None,
+            effective_iterations: None,
             raid_members: Vec::new(),
             status: "pending".to_string(),
             created_at: now,
@@ -1688,7 +1691,7 @@ mod tests {
             "class": "mage",
             "spec": "arcane",
             "items": [
-                { "id": 95261, "upgradeStep": 2 },
+                { "id": 45703, "upgradeStep": 2 },
                 { "id": 94524, "upgradeStep": 2 }
             ],
             "rotation": { "type": "TypeAuto" }
@@ -1697,10 +1700,13 @@ mod tests {
         let player = build_player_from_run(&run).unwrap();
         let items = &player.equipment.as_ref().unwrap().items;
 
-        assert_eq!(items[0].id, 95261);
+        assert_eq!(items[0].id, 45703);
         assert_eq!(items[0].upgrade_step, ItemLevelState::Base as i32);
         assert_eq!(items[1].id, 94524);
         assert_eq!(items[1].upgrade_step, ItemLevelState::UpgradeStepTwo as i32);
+    }
+}
+
 pub fn build_player_from_run(run: &db::SimulationRun) -> Result<Player> {
     build_player_from_payload(
         &run.discord_user_id,

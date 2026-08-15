@@ -1,12 +1,18 @@
 use anyhow::{Context, Result, anyhow};
 use prost::Message;
+use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
+use serde_json::Value;
 use sqlx::PgPool;
 use std::collections::HashSet;
+use std::sync::OnceLock;
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
 use crate::db;
-use crate::mop_proto::mop::{AsyncApiResult, ProgressMetrics, Raid, RaidSimRequest, SimType};
+use crate::mop_proto::mop::{
+    AplRotation, AsyncApiResult, Debuffs, PartyBuffs, ProgressMetrics, Raid, RaidBuffs,
+    RaidSimRequest, SimType, player,
+};
 use crate::parsing::build_player_from_run;
 use crate::sim_request_codec::{parse_raid_sim_request, protojson_message_to_value};
 use crate::sim_runtime_targets::{
@@ -477,6 +483,25 @@ fn build_default_request(run: &db::SimulationRun, run_id: Uuid) -> Result<RaidSi
     let mut raid = default_mop_raid();
     raid.parties[0].players[0] = mapped_player;
 
+    if let Some(payload) = extract_raid_buffs_payload(&run.gear_payload) {
+        raid.buffs = Some(parse_protojson_message::<RaidBuffs>(
+            "proto.RaidBuffs",
+            payload,
+        )?);
+    }
+    if let Some(payload) = extract_debuffs_payload(&run.gear_payload) {
+        raid.debuffs = Some(parse_protojson_message::<Debuffs>(
+            "proto.Debuffs",
+            payload,
+        )?);
+    }
+    if let Some(payload) = extract_party_buffs_payload(&run.gear_payload) {
+        raid.parties[0].buffs = Some(parse_protojson_message::<PartyBuffs>(
+            "proto.PartyBuffs",
+            payload,
+        )?);
+    }
+
     Ok(RaidSimRequest {
         request_id: run_id.to_string(),
         raid: Some(raid),
@@ -754,7 +779,50 @@ pub async fn run_async_simulation(
 mod tests {
     use super::*;
     use chrono::Utc;
-    use serde_json::Value;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn preserves_exported_raid_debuff_and_party_buffs() {
+        let mut payload: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/gear-profile.json"))
+                .expect("fixture must be valid JSON");
+        payload["raidBuffs"] = json!({ "hornOfWinter": true });
+        payload["debuffs"] = json!({ "weakenedArmor": true });
+        payload["partyBuffs"] = json!({});
+
+        let run = db::SimulationRun {
+            run_id: Uuid::new_v4(),
+            discord_user_id: "buff-test".to_string(),
+            class: "mage".to_string(),
+            spec: "arcane".to_string(),
+            gear_payload: payload,
+            input_format: "gear-json".to_string(),
+            upstream_revision: None,
+            normalized_request: None,
+            effective_random_seed: None,
+            effective_iterations: None,
+            raid_members: Vec::new(),
+            status: "queued".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let request =
+            build_default_request(&run, run.run_id).expect("fixture must build a default request");
+        let raid = request.raid.expect("request must include a raid");
+
+        assert!(
+            raid.buffs
+                .expect("raid buffs must be preserved")
+                .horn_of_winter
+        );
+        assert!(
+            raid.debuffs
+                .expect("debuffs must be preserved")
+                .weakened_armor
+        );
+        assert!(raid.parties[0].buffs.is_some());
+    }
 
     #[tokio::test]
     #[ignore = "requires a running WoWSims async API at WOWSIMS_API_BASE_URL"]
