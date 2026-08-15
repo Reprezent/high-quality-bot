@@ -6,7 +6,7 @@ A Discord bot written in Rust that runs World of Warcraft simulations via slash 
 
 | Command | Description |
 |---------|-------------|
-| `/sim <gear_json>` | Queue a WoW simulation from a WoWSims JSON payload (must include player class/spec). Returns a run ID. |
+| `/sim <gear_json>` | Queue a simulation from a gear profile JSON payload containing class, spec, and gear items. The server supplies raid, encounter, and sim defaults. |
 | `/class <class>[:<spec>]` | Save your default class (and optionally spec) to the database. |
 | `/status <run-id>` | Check the current status of a simulation run by its UUID. |
 | `/health` | Check if the bot can reach PostgreSQL and the wowsims async API. |
@@ -19,7 +19,6 @@ A Discord bot written in Rust that runs World of Warcraft simulations via slash 
 ### Examples
 
 ```
-/sim {"player":{"class":"ClassWarrior","armsWarrior":{},"equipment":{"items":[{"id":123}]}}}
 /class warrior:arms
 /class paladin
 /status 550e8400-e29b-41d4-a716-446655440000
@@ -28,6 +27,39 @@ A Discord bot written in Rust that runs World of Warcraft simulations via slash 
 /piss
 /warcraftlogs track "Example Guild" area-52 US #raid-logs
 /warcraftlogs status
+```
+
+### Running a gear profile
+
+`/sim` accepts a compact gear profile JSON payload. It supports the flat
+Warcraft Logs-style shape (`class`, `spec`, `name`, `race`, `talents`, `glyphs`,
+`professions`, and `gear.items`) as well as the existing nested WoWSims player
+shape. The payload must provide class and spec so the bot can select the
+appropriate player implementation and default rotation.
+
+The bot preserves the simulation-relevant player data that is supplied:
+
+- Character name, race, talents, glyphs, professions, gear, gems, enchants,
+  reforges, and upgrade levels.
+- A custom rotation when the payload includes one; otherwise the bot loads the
+  vendored default APL for that class/spec.
+
+The server deliberately supplies the rest: default raid and party buffs,
+debuffs, encounter target and duration, 12,500 iterations, and a generated
+random seed. The generated request, seed, and iterations are persisted with the
+run for diagnostics and reproducibility.
+
+For example:
+
+```json
+{
+  "class": "mage",
+  "spec": "arcane",
+  "race": "NightElf",
+  "talents": "311222",
+  "professions": [{"name": "Enchanting"}, {"name": "Tailoring"}],
+  "gear": {"items": [{"id": 103900, "gems": [95347, 76700], "upgrade_step": 2}]}
+}
 ```
 
 ## Prerequisites
@@ -88,7 +120,7 @@ This starts:
 | `WARCRAFT_LOGS_CLIENT_SECRET` | — | empty | Warcraft Logs API v2 client secret. Never expose this in Discord or commit it. |
 | `WARCRAFT_LOGS_POLL_INTERVAL_SECS` | — | `60` | Base report/fight polling interval; values below 30 seconds are clamped to 30. |
 | `LOG_SIM_REQUEST_JSON` | — | `false` | When true (`1/true/yes/on`), logs outgoing raid sim request as pretty JSON before calling backend |
-| `WOWSIMS_SIM_DEBUG` | — | `false` | When true (`1/true/yes/on`), sends `simOptions.debug=true` to backend sim |
+| `WOWSIMS_SIM_DEBUG` | — | `false` | Diagnostic override: when true (`1/true/yes/on`), sends `simOptions.debug=true` to backend sim. Leave off for UI-equivalent runs. |
 | `RUST_LOG` | — | `info` | Log level |
 
 If `DISCORD_GUILD_ID` is set, Discord command updates are usually visible almost immediately in that server. Leave it unset for production-style global registration.
@@ -164,6 +196,10 @@ MOP_PROTO_DIR=/absolute/path/to/mop/proto cargo check --features mop-proto
 git submodule update --remote --merge vendor/wowsims-mop
 git add vendor/wowsims-mop .gitmodules
 ```
+
+When advancing the submodule, also update `MOP_UPSTREAM_REVISION` in
+[`build.rs`](build.rs) to the new submodule commit so persisted runs retain the
+simulator revision used to normalize their request.
 
 ### Running the local async sim API
 

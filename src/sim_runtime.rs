@@ -14,6 +14,7 @@ use crate::mop_proto::mop::{
     RaidSimRequest, SimType, player,
 };
 use crate::parsing::build_player_from_run;
+use crate::sim_request_codec::{parse_raid_sim_request, protojson_message_to_value};
 use crate::sim_runtime_targets::{
     default_mop_encounter, default_mop_raid, default_mop_sim_options,
 };
@@ -247,6 +248,61 @@ fn apl_rotation_to_json(rotation: &AplRotation) -> Value {
     }
 }
 
+fn individual_buffs_to_json(buffs: &crate::mop_proto::mop::IndividualBuffs) -> Value {
+    serde_json::json!({
+        "innervateCount": buffs.innervate_count,
+        "hymnOfHopeCount": buffs.hymn_of_hope_count,
+        "unholyFrenzyCount": buffs.unholy_frenzy_count,
+        "tricksOfTheTrade": buffs.tricks_of_the_trade,
+        "devotionAuraCount": buffs.devotion_aura_count,
+        "painSuppressionCount": buffs.pain_suppression_count,
+        "vigilanceCount": buffs.vigilance_count,
+        "guardianSpiritCount": buffs.guardian_spirit_count,
+        "rallyingCryCount": buffs.rallying_cry_count,
+        "shatteringThrowCount": buffs.shattering_throw_count,
+    })
+}
+
+fn spec_options_present(spec: &Option<player::Spec>) -> bool {
+    match spec {
+        Some(player::Spec::BloodDeathKnight(value)) => value.options.is_some(),
+        Some(player::Spec::FrostDeathKnight(value)) => value.options.is_some(),
+        Some(player::Spec::UnholyDeathKnight(value)) => value.options.is_some(),
+        Some(player::Spec::BalanceDruid(value)) => value.options.is_some(),
+        Some(player::Spec::FeralDruid(value)) => value.options.is_some(),
+        Some(player::Spec::GuardianDruid(value)) => value.options.is_some(),
+        Some(player::Spec::RestorationDruid(value)) => value.options.is_some(),
+        Some(player::Spec::BeastMasteryHunter(value)) => value.options.is_some(),
+        Some(player::Spec::MarksmanshipHunter(value)) => value.options.is_some(),
+        Some(player::Spec::SurvivalHunter(value)) => value.options.is_some(),
+        Some(player::Spec::ArcaneMage(value)) => value.options.is_some(),
+        Some(player::Spec::FireMage(value)) => value.options.is_some(),
+        Some(player::Spec::FrostMage(value)) => value.options.is_some(),
+        Some(player::Spec::BrewmasterMonk(value)) => value.options.is_some(),
+        Some(player::Spec::MistweaverMonk(value)) => value.options.is_some(),
+        Some(player::Spec::WindwalkerMonk(value)) => value.options.is_some(),
+        Some(player::Spec::HolyPaladin(value)) => value.options.is_some(),
+        Some(player::Spec::ProtectionPaladin(value)) => value.options.is_some(),
+        Some(player::Spec::RetributionPaladin(value)) => value.options.is_some(),
+        Some(player::Spec::DisciplinePriest(value)) => value.options.is_some(),
+        Some(player::Spec::HolyPriest(value)) => value.options.is_some(),
+        Some(player::Spec::ShadowPriest(value)) => value.options.is_some(),
+        Some(player::Spec::AssassinationRogue(value)) => value.options.is_some(),
+        Some(player::Spec::CombatRogue(value)) => value.options.is_some(),
+        Some(player::Spec::SubtletyRogue(value)) => value.options.is_some(),
+        Some(player::Spec::ElementalShaman(value)) => value.options.is_some(),
+        Some(player::Spec::EnhancementShaman(value)) => value.options.is_some(),
+        Some(player::Spec::RestorationShaman(value)) => value.options.is_some(),
+        Some(player::Spec::AfflictionWarlock(value)) => value.options.is_some(),
+        Some(player::Spec::DemonologyWarlock(value)) => value.options.is_some(),
+        Some(player::Spec::DestructionWarlock(value)) => value.options.is_some(),
+        Some(player::Spec::ArmsWarrior(value)) => value.options.is_some(),
+        Some(player::Spec::FuryWarrior(value)) => value.options.is_some(),
+        Some(player::Spec::ProtectionWarrior(value)) => value.options.is_some(),
+        None => false,
+    }
+}
+
 fn request_to_json(request: &RaidSimRequest) -> Value {
     let raid = request.raid.as_ref();
     let encounter = request.encounter.as_ref();
@@ -293,10 +349,43 @@ fn request_to_json(request: &RaidSimRequest) -> Value {
                                 "name": player.name,
                                 "class": player.class,
                                 "race": player.race,
+                                "apiVersion": player.api_version,
                                 "talentsString": player.talents_string,
                                 "spec": player_spec_label(&player.spec),
+                                "specOptionsPresent": spec_options_present(&player.spec),
                                 "rotationPresent": player.rotation.is_some(),
                                 "rotationApl": player.rotation.as_ref().map(apl_rotation_to_json),
+                                "consumables": player.consumables.as_ref().map(|consumables| serde_json::json!({
+                                    "prepotId": consumables.prepot_id,
+                                    "potId": consumables.pot_id,
+                                    "flaskId": consumables.flask_id,
+                                    "battleElixirId": consumables.battle_elixir_id,
+                                    "guardianElixirId": consumables.guardian_elixir_id,
+                                    "foodId": consumables.food_id,
+                                    "explosiveId": consumables.explosive_id,
+                                    "conjuredId": consumables.conjured_id,
+                                })),
+                                "bonusStats": player.bonus_stats.as_ref().map(|stats| serde_json::json!({
+                                    "apiVersion": stats.api_version,
+                                    "stats": stats.stats,
+                                    "pseudoStats": stats.pseudo_stats,
+                                })),
+                                "enableItemSwap": player.enable_item_swap,
+                                "itemSwapPresent": player.item_swap.is_some(),
+                                "individualBuffs": player.buffs.as_ref().map(individual_buffs_to_json),
+                                "profession1": player.profession1,
+                                "profession2": player.profession2,
+                                "cooldowns": player.cooldowns.as_ref().map(|cooldowns| serde_json::json!({
+                                    "count": cooldowns.cooldowns.len(),
+                                    "hpPercentForDefensives": cooldowns.hp_percent_for_defensives,
+                                })),
+                                "reactionTimeMs": player.reaction_time_ms,
+                                "channelClipDelayMs": player.channel_clip_delay_ms,
+                                "inFrontOfTarget": player.in_front_of_target,
+                                "distanceFromTarget": player.distance_from_target,
+                                "darkIntentUptime": player.dark_intent_uptime,
+                                "challengeMode": player.challenge_mode,
+                                "healingModelPresent": player.healing_model.is_some(),
                                 "equipment": {
                                     "items": equipment_items,
                                 },
@@ -371,13 +460,15 @@ fn maybe_log_request_json(run_id: Uuid, request: &RaidSimRequest) {
             let normalized = value.trim().to_ascii_lowercase();
             normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on"
         })
-        .unwrap_or(true);
+        .unwrap_or(false);
 
     if !enabled {
         return;
     }
 
-    match serde_json::to_string_pretty(&request_to_json(request)) {
+    match protojson_message_to_value("proto.RaidSimRequest", request)
+        .and_then(|value| serde_json::to_string_pretty(&value).map_err(Into::into))
+    {
         Ok(json) => {
             tracing::info!(run_id = %run_id, request_json = %json, "sending raid sim request")
         }
@@ -385,6 +476,39 @@ fn maybe_log_request_json(run_id: Uuid, request: &RaidSimRequest) {
             tracing::warn!(run_id = %run_id, error = ?error, "failed to serialize raid sim request json")
         }
     }
+}
+
+fn build_default_request(run: &db::SimulationRun, run_id: Uuid) -> Result<RaidSimRequest> {
+    let mapped_player = build_player_from_run(run)?;
+    let mut raid = default_mop_raid();
+    raid.parties[0].players[0] = mapped_player;
+
+    if let Some(payload) = extract_raid_buffs_payload(&run.gear_payload) {
+        raid.buffs = Some(parse_protojson_message::<RaidBuffs>(
+            "proto.RaidBuffs",
+            payload,
+        )?);
+    }
+    if let Some(payload) = extract_debuffs_payload(&run.gear_payload) {
+        raid.debuffs = Some(parse_protojson_message::<Debuffs>(
+            "proto.Debuffs",
+            payload,
+        )?);
+    }
+    if let Some(payload) = extract_party_buffs_payload(&run.gear_payload) {
+        raid.parties[0].buffs = Some(parse_protojson_message::<PartyBuffs>(
+            "proto.PartyBuffs",
+            payload,
+        )?);
+    }
+
+    Ok(RaidSimRequest {
+        request_id: run_id.to_string(),
+        raid: Some(raid),
+        encounter: Some(default_mop_encounter()),
+        sim_options: Some(default_mop_sim_options(run_id)),
+        r#type: SimType::Raid as i32,
+    })
 }
 
 pub async fn run_async_simulation(
@@ -401,66 +525,29 @@ pub async fn run_async_simulation(
         .await?
         .ok_or_else(|| anyhow!("simulation run not found: {}", run_id))?;
 
-    let mapped_player = build_player_from_run(&run)?;
-    let mut raid = default_mop_raid();
-
-    if let Some(raid_buffs_payload) = extract_raid_buffs_payload(&run.gear_payload) {
-        match parse_protojson_message::<RaidBuffs>("proto.RaidBuffs", raid_buffs_payload) {
-            Ok(raid_buffs) => {
-                raid.buffs = Some(raid_buffs);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    run_id = %run_id,
-                    error = ?error,
-                    "failed to parse raidBuffs from payload; using default raid buffs"
-                );
-            }
+    let mut request = match run.normalized_request.as_ref() {
+        Some(payload) => parse_raid_sim_request(payload).with_context(|| {
+            format!("failed to load normalized simulation request for run {run_id}")
+        })?,
+        None => {
+            let request = build_default_request(&run, run_id)?;
+            let normalized_request = protojson_message_to_value("proto.RaidSimRequest", &request)?;
+            let sim_options = request
+                .sim_options
+                .as_ref()
+                .ok_or_else(|| anyhow!("default simulation request is missing sim options"))?;
+            db::update_simulation_run_request(
+                &pool,
+                run_id,
+                &normalized_request,
+                sim_options.random_seed,
+                sim_options.iterations,
+            )
+            .await?;
+            request
         }
-    }
-
-    if let Some(debuffs_payload) = extract_debuffs_payload(&run.gear_payload) {
-        match parse_protojson_message::<Debuffs>("proto.Debuffs", debuffs_payload) {
-            Ok(debuffs) => {
-                raid.debuffs = Some(debuffs);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    run_id = %run_id,
-                    error = ?error,
-                    "failed to parse debuffs from payload; using default debuffs"
-                );
-            }
-        }
-    }
-
-    if let Some(party_buffs_payload) = extract_party_buffs_payload(&run.gear_payload) {
-        match parse_protojson_message::<PartyBuffs>("proto.PartyBuffs", party_buffs_payload) {
-            Ok(party_buffs) => {
-                if let Some(party) = raid.parties.get_mut(0) {
-                    party.buffs = Some(party_buffs);
-                }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    run_id = %run_id,
-                    error = ?error,
-                    "failed to parse partyBuffs from payload; using default party buffs"
-                );
-            }
-        }
-    }
-
-    raid.parties[0].players[0] = mapped_player;
-
-    let request = RaidSimRequest {
-        request_id: request_id.clone(),
-        raid: Some(raid),
-        encounter: Some(default_mop_encounter()),
-        sim_options: Some(default_mop_sim_options(run_id)),
-        r#type: SimType::Raid as i32,
-        ..Default::default()
     };
+    request.request_id = request_id.clone();
 
     if let Err(error) = validate_sim_request_payload(&request) {
         db::update_simulation_run_status(&pool, run_id, "failed").await?;
@@ -685,5 +772,155 @@ pub async fn run_async_simulation(
         }
 
         sleep(Duration::from_secs(1)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn preserves_exported_raid_debuff_and_party_buffs() {
+        let mut payload: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/gear-profile.json"))
+                .expect("fixture must be valid JSON");
+        payload["raidBuffs"] = json!({ "hornOfWinter": true });
+        payload["debuffs"] = json!({ "weakenedArmor": true });
+        payload["partyBuffs"] = json!({});
+
+        let run = db::SimulationRun {
+            run_id: Uuid::new_v4(),
+            discord_user_id: "buff-test".to_string(),
+            class: "mage".to_string(),
+            spec: "arcane".to_string(),
+            gear_payload: payload,
+            input_format: "gear-json".to_string(),
+            upstream_revision: None,
+            normalized_request: None,
+            effective_random_seed: None,
+            effective_iterations: None,
+            raid_members: Vec::new(),
+            status: "queued".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let request =
+            build_default_request(&run, run.run_id).expect("fixture must build a default request");
+        let raid = request.raid.expect("request must include a raid");
+
+        assert!(
+            raid.buffs
+                .expect("raid buffs must be preserved")
+                .horn_of_winter
+        );
+        assert!(
+            raid.debuffs
+                .expect("debuffs must be preserved")
+                .weakened_armor
+        );
+        assert!(raid.parties[0].buffs.is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a running WoWSims async API at WOWSIMS_API_BASE_URL"]
+    async fn submits_a_defaulted_gear_profile_request_to_the_async_api() {
+        let base_url = std::env::var("WOWSIMS_API_BASE_URL")
+            .expect("WOWSIMS_API_BASE_URL must point at a running simulator");
+        let payload: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/gear-profile.json"))
+                .expect("fixture must be valid JSON");
+        let run = db::SimulationRun {
+            run_id: Uuid::new_v4(),
+            discord_user_id: "smoke-test".to_string(),
+            class: "mage".to_string(),
+            spec: "arcane".to_string(),
+            gear_payload: payload,
+            input_format: "gear-json".to_string(),
+            upstream_revision: None,
+            normalized_request: None,
+            effective_random_seed: None,
+            effective_iterations: None,
+            raid_members: Vec::new(),
+            status: "queued".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let mut request =
+            build_default_request(&run, run.run_id).expect("fixture must build a default request");
+        request.sim_options.as_mut().unwrap().iterations = 1;
+        let client = reqwest::Client::new();
+
+        let response = client
+            .post(format!(
+                "{base_url}/raidSimAsync?requestId={}",
+                request.request_id
+            ))
+            .header("content-type", "application/x-protobuf")
+            .body(request.encode_to_vec())
+            .send()
+            .await
+            .expect("async API request must complete");
+        assert!(
+            response.status().is_success(),
+            "raidSimAsync returned {}",
+            response.status()
+        );
+        let async_result = AsyncApiResult::decode(
+            response
+                .bytes()
+                .await
+                .expect("async API response body must be readable")
+                .as_ref(),
+        )
+        .expect("async API response must be protobuf");
+
+        for _ in 0..120 {
+            let response = client
+                .post(format!("{base_url}/asyncProgress"))
+                .header("content-type", "application/x-protobuf")
+                .body(async_result.encode_to_vec())
+                .send()
+                .await
+                .expect("async progress request must complete");
+
+            if response.status().as_u16() == 204 {
+                sleep(Duration::from_millis(250)).await;
+                continue;
+            }
+
+            assert!(
+                response.status().is_success(),
+                "asyncProgress returned {}",
+                response.status()
+            );
+            let progress = ProgressMetrics::decode(
+                response
+                    .bytes()
+                    .await
+                    .expect("async progress body must be readable")
+                    .as_ref(),
+            )
+            .expect("async progress body must be protobuf");
+
+            if let Some(result) = progress.final_raid_result {
+                let error_message = result
+                    .error
+                    .as_ref()
+                    .map(|error| error.message.as_str())
+                    .unwrap_or("no simulator error");
+                assert!(
+                    result.error.is_none(),
+                    "simulator rejected normalized request: {error_message}"
+                );
+                return;
+            }
+
+            sleep(Duration::from_millis(250)).await;
+        }
+
+        panic!("simulator did not return final metrics within 30 seconds");
     }
 }

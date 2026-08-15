@@ -21,6 +21,7 @@ RUN cargo build --release 2>/dev/null || true
 # Copy the real source code, migrations, and vendored proto definitions
 COPY src ./src
 COPY migrations ./migrations
+COPY vendor/wowsims-mop/assets/database ./vendor/wowsims-mop/assets/database
 COPY vendor/wowsims-mop/proto ./vendor/wowsims-mop/proto
 COPY vendor/wowsims-mop/ui ./vendor/wowsims-mop/ui
 
@@ -43,6 +44,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy the compiled binary and migrations
 COPY --from=builder /app/target/release/high-quality-bot ./high-quality-bot
 COPY --from=builder /app/migrations ./migrations
+COPY --from=builder /app/vendor/wowsims-mop/assets/database ./vendor/wowsims-mop/assets/database
 COPY --from=builder /app/vendor/wowsims-mop/ui ./vendor/wowsims-mop/ui
 
 # Create a non-root user
