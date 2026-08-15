@@ -629,6 +629,7 @@ pub struct WarcraftLogsRegion {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GuildReportsVariables {
+    #[serde(rename = "guildID")]
     guild_id: i64,
     start_time: Option<f64>,
     end_time: Option<f64>,
@@ -755,6 +756,7 @@ impl WarcraftLogsFight {
 #[serde(rename_all = "camelCase")]
 struct KillSummaryVariables<'a> {
     code: &'a str,
+    #[serde(rename = "fightID")]
     fight_id: i32,
 }
 
@@ -861,8 +863,9 @@ fn parse_death_count(summary: &Value, deaths: &Value) -> Result<Option<u64>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        RateLimitInfo, WarcraftLogsClient, WarcraftLogsConfig, WarcraftLogsFight, WarcraftLogsSite,
-        parse_death_count, parse_metric_entries,
+        GuildReportsVariables, KillSummaryVariables, RateLimitInfo, WarcraftLogsClient,
+        WarcraftLogsConfig, WarcraftLogsFight, WarcraftLogsSite, parse_death_count,
+        parse_metric_entries,
     };
     use serde_json::{Value, json};
     use std::time::Duration;
@@ -929,6 +932,28 @@ mod tests {
             WarcraftLogsSite::Classic.report_url("abc"),
             "https://classic.warcraftlogs.com/reports/abc"
         );
+    }
+
+    #[test]
+    fn serializes_graphql_id_variables_with_exact_acronym_case() {
+        let reports = serde_json::to_value(GuildReportsVariables {
+            guild_id: 42,
+            start_time: None,
+            end_time: None,
+            page: 1,
+            limit: 3,
+        })
+        .unwrap();
+        assert_eq!(reports["guildID"], 42);
+        assert!(reports.get("guildId").is_none());
+
+        let summary = serde_json::to_value(KillSummaryVariables {
+            code: "abc",
+            fight_id: 7,
+        })
+        .unwrap();
+        assert_eq!(summary["fightID"], 7);
+        assert!(summary.get("fightId").is_none());
     }
 
     #[test]
@@ -1067,6 +1092,8 @@ mod tests {
         assert_eq!(requests.len(), 3);
         assert!(requests[0].starts_with("POST /oauth "));
         assert!(requests[1].starts_with("POST /graphql "));
+        assert!(requests[1].contains("\"guildID\":42"));
+        assert!(!requests[1].contains("\"guildId\":42"));
         assert!(requests[1].contains("\"page\":1"));
         assert!(requests[2].contains("\"page\":2"));
         assert_eq!(
