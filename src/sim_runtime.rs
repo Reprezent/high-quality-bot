@@ -1,12 +1,18 @@
 use anyhow::{Context, Result, anyhow};
 use prost::Message;
+use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
+use serde_json::Value;
 use sqlx::PgPool;
 use std::collections::HashSet;
+use std::sync::OnceLock;
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
 use crate::db;
-use crate::mop_proto::mop::{AsyncApiResult, ProgressMetrics, Raid, RaidSimRequest, SimType};
+use crate::mop_proto::mop::{
+    AplRotation, AsyncApiResult, Debuffs, PartyBuffs, ProgressMetrics, Raid, RaidBuffs,
+    RaidSimRequest, SimType, player,
+};
 use crate::parsing::build_player_from_run;
 use crate::sim_request_codec::{parse_raid_sim_request, protojson_message_to_value};
 use crate::sim_runtime_targets::{
@@ -81,6 +87,373 @@ fn extract_raid_members(progress: &ProgressMetrics) -> Vec<String> {
     raid_members
 }
 
+fn player_spec_label(spec: &Option<player::Spec>) -> &'static str {
+    match spec {
+        Some(player::Spec::BloodDeathKnight(_)) => "bloodDeathKnight",
+        Some(player::Spec::FrostDeathKnight(_)) => "frostDeathKnight",
+        Some(player::Spec::UnholyDeathKnight(_)) => "unholyDeathKnight",
+        Some(player::Spec::BalanceDruid(_)) => "balanceDruid",
+        Some(player::Spec::FeralDruid(_)) => "feralDruid",
+        Some(player::Spec::GuardianDruid(_)) => "guardianDruid",
+        Some(player::Spec::RestorationDruid(_)) => "restorationDruid",
+        Some(player::Spec::BeastMasteryHunter(_)) => "beastMasteryHunter",
+        Some(player::Spec::MarksmanshipHunter(_)) => "marksmanshipHunter",
+        Some(player::Spec::SurvivalHunter(_)) => "survivalHunter",
+        Some(player::Spec::ArcaneMage(_)) => "arcaneMage",
+        Some(player::Spec::FireMage(_)) => "fireMage",
+        Some(player::Spec::FrostMage(_)) => "frostMage",
+        Some(player::Spec::BrewmasterMonk(_)) => "brewmasterMonk",
+        Some(player::Spec::MistweaverMonk(_)) => "mistweaverMonk",
+        Some(player::Spec::WindwalkerMonk(_)) => "windwalkerMonk",
+        Some(player::Spec::HolyPaladin(_)) => "holyPaladin",
+        Some(player::Spec::ProtectionPaladin(_)) => "protectionPaladin",
+        Some(player::Spec::RetributionPaladin(_)) => "retributionPaladin",
+        Some(player::Spec::DisciplinePriest(_)) => "disciplinePriest",
+        Some(player::Spec::HolyPriest(_)) => "holyPriest",
+        Some(player::Spec::ShadowPriest(_)) => "shadowPriest",
+        Some(player::Spec::AssassinationRogue(_)) => "assassinationRogue",
+        Some(player::Spec::CombatRogue(_)) => "combatRogue",
+        Some(player::Spec::SubtletyRogue(_)) => "subtletyRogue",
+        Some(player::Spec::ElementalShaman(_)) => "elementalShaman",
+        Some(player::Spec::EnhancementShaman(_)) => "enhancementShaman",
+        Some(player::Spec::RestorationShaman(_)) => "restorationShaman",
+        Some(player::Spec::AfflictionWarlock(_)) => "afflictionWarlock",
+        Some(player::Spec::DemonologyWarlock(_)) => "demonologyWarlock",
+        Some(player::Spec::DestructionWarlock(_)) => "destructionWarlock",
+        Some(player::Spec::ArmsWarrior(_)) => "armsWarrior",
+        Some(player::Spec::FuryWarrior(_)) => "furyWarrior",
+        Some(player::Spec::ProtectionWarrior(_)) => "protectionWarrior",
+        None => "unknown",
+    }
+}
+
+fn proto_descriptor_pool() -> Result<&'static DescriptorPool> {
+    static DESCRIPTOR_POOL: OnceLock<Result<DescriptorPool, String>> = OnceLock::new();
+
+    let pool = DESCRIPTOR_POOL.get_or_init(|| {
+        DescriptorPool::decode(crate::mop_proto::mop::DESCRIPTOR_SET_BYTES)
+            .map_err(|error| format!("failed to decode protobuf descriptor set: {error}"))
+    });
+
+    match pool {
+        Ok(pool) => Ok(pool),
+        Err(error) => Err(anyhow!(error.clone())),
+    }
+}
+
+fn apl_rotation_descriptor() -> Result<&'static MessageDescriptor> {
+    static APL_ROTATION_DESCRIPTOR: OnceLock<Result<MessageDescriptor, String>> = OnceLock::new();
+
+    let descriptor = APL_ROTATION_DESCRIPTOR.get_or_init(|| {
+        let pool = proto_descriptor_pool().map_err(|error| format!("{error:#}"))?;
+
+        pool.get_message_by_name("proto.APLRotation")
+            .ok_or_else(|| "APLRotation descriptor not found in descriptor set".to_string())
+    });
+
+    match descriptor {
+        Ok(descriptor) => Ok(descriptor),
+        Err(error) => Err(anyhow!(error.clone())),
+    }
+}
+
+fn parse_protojson_message<T>(message_name: &str, value: &Value) -> Result<T>
+where
+    T: Message + Default,
+{
+    let pool = proto_descriptor_pool()?;
+    let descriptor = pool
+        .get_message_by_name(message_name)
+        .ok_or_else(|| anyhow!("{message_name} descriptor not found in descriptor set"))?;
+
+    let payload = serde_json::to_string(value)
+        .with_context(|| format!("failed to serialize {message_name} payload as JSON"))?;
+    let mut deserializer = serde_json::Deserializer::from_str(&payload);
+    let dynamic = DynamicMessage::deserialize(descriptor, &mut deserializer)
+        .with_context(|| format!("failed to decode {message_name} protojson"))?;
+
+    dynamic
+        .transcode_to::<T>()
+        .with_context(|| format!("failed to transcode dynamic {message_name} message"))
+}
+
+fn extract_raid_buffs_payload(payload: &Value) -> Option<&Value> {
+    payload
+        .get("raidBuffs")
+        .or_else(|| payload.get("raid_buffs"))
+        .or_else(|| {
+            payload
+                .get("settings")
+                .and_then(|settings| settings.get("raidBuffs"))
+        })
+        .or_else(|| {
+            payload
+                .get("settings")
+                .and_then(|settings| settings.get("raid_buffs"))
+        })
+}
+
+fn extract_debuffs_payload(payload: &Value) -> Option<&Value> {
+    payload.get("debuffs").or_else(|| {
+        payload
+            .get("settings")
+            .and_then(|settings| settings.get("debuffs"))
+    })
+}
+
+fn extract_party_buffs_payload(payload: &Value) -> Option<&Value> {
+    payload
+        .get("partyBuffs")
+        .or_else(|| payload.get("party_buffs"))
+        .or_else(|| {
+            payload
+                .get("settings")
+                .and_then(|settings| settings.get("partyBuffs"))
+        })
+        .or_else(|| {
+            payload
+                .get("settings")
+                .and_then(|settings| settings.get("party_buffs"))
+        })
+        .or_else(|| {
+            payload
+                .get("raid")
+                .and_then(|raid| raid.get("parties"))
+                .and_then(|parties| parties.as_array())
+                .and_then(|parties| parties.first())
+                .and_then(|party| party.get("buffs"))
+        })
+}
+
+fn apl_rotation_to_json(rotation: &AplRotation) -> Value {
+    let descriptor = match apl_rotation_descriptor() {
+        Ok(descriptor) => descriptor,
+        Err(error) => {
+            return serde_json::json!({
+                "serializationError": format!("{error:#}"),
+            });
+        }
+    };
+
+    let bytes = rotation.encode_to_vec();
+    match DynamicMessage::decode(descriptor.clone(), &mut bytes.as_slice()) {
+        Ok(dynamic) => serde_json::to_value(dynamic).unwrap_or_else(|error| {
+            serde_json::json!({
+                "serializationError": format!("failed to serialize APL dynamic message to json: {error}"),
+            })
+        }),
+        Err(error) => serde_json::json!({
+            "serializationError": format!("failed to decode APL rotation bytes: {error}"),
+        }),
+    }
+}
+
+fn individual_buffs_to_json(buffs: &crate::mop_proto::mop::IndividualBuffs) -> Value {
+    serde_json::json!({
+        "innervateCount": buffs.innervate_count,
+        "hymnOfHopeCount": buffs.hymn_of_hope_count,
+        "unholyFrenzyCount": buffs.unholy_frenzy_count,
+        "tricksOfTheTrade": buffs.tricks_of_the_trade,
+        "devotionAuraCount": buffs.devotion_aura_count,
+        "painSuppressionCount": buffs.pain_suppression_count,
+        "vigilanceCount": buffs.vigilance_count,
+        "guardianSpiritCount": buffs.guardian_spirit_count,
+        "rallyingCryCount": buffs.rallying_cry_count,
+        "shatteringThrowCount": buffs.shattering_throw_count,
+    })
+}
+
+fn spec_options_present(spec: &Option<player::Spec>) -> bool {
+    match spec {
+        Some(player::Spec::BloodDeathKnight(value)) => value.options.is_some(),
+        Some(player::Spec::FrostDeathKnight(value)) => value.options.is_some(),
+        Some(player::Spec::UnholyDeathKnight(value)) => value.options.is_some(),
+        Some(player::Spec::BalanceDruid(value)) => value.options.is_some(),
+        Some(player::Spec::FeralDruid(value)) => value.options.is_some(),
+        Some(player::Spec::GuardianDruid(value)) => value.options.is_some(),
+        Some(player::Spec::RestorationDruid(value)) => value.options.is_some(),
+        Some(player::Spec::BeastMasteryHunter(value)) => value.options.is_some(),
+        Some(player::Spec::MarksmanshipHunter(value)) => value.options.is_some(),
+        Some(player::Spec::SurvivalHunter(value)) => value.options.is_some(),
+        Some(player::Spec::ArcaneMage(value)) => value.options.is_some(),
+        Some(player::Spec::FireMage(value)) => value.options.is_some(),
+        Some(player::Spec::FrostMage(value)) => value.options.is_some(),
+        Some(player::Spec::BrewmasterMonk(value)) => value.options.is_some(),
+        Some(player::Spec::MistweaverMonk(value)) => value.options.is_some(),
+        Some(player::Spec::WindwalkerMonk(value)) => value.options.is_some(),
+        Some(player::Spec::HolyPaladin(value)) => value.options.is_some(),
+        Some(player::Spec::ProtectionPaladin(value)) => value.options.is_some(),
+        Some(player::Spec::RetributionPaladin(value)) => value.options.is_some(),
+        Some(player::Spec::DisciplinePriest(value)) => value.options.is_some(),
+        Some(player::Spec::HolyPriest(value)) => value.options.is_some(),
+        Some(player::Spec::ShadowPriest(value)) => value.options.is_some(),
+        Some(player::Spec::AssassinationRogue(value)) => value.options.is_some(),
+        Some(player::Spec::CombatRogue(value)) => value.options.is_some(),
+        Some(player::Spec::SubtletyRogue(value)) => value.options.is_some(),
+        Some(player::Spec::ElementalShaman(value)) => value.options.is_some(),
+        Some(player::Spec::EnhancementShaman(value)) => value.options.is_some(),
+        Some(player::Spec::RestorationShaman(value)) => value.options.is_some(),
+        Some(player::Spec::AfflictionWarlock(value)) => value.options.is_some(),
+        Some(player::Spec::DemonologyWarlock(value)) => value.options.is_some(),
+        Some(player::Spec::DestructionWarlock(value)) => value.options.is_some(),
+        Some(player::Spec::ArmsWarrior(value)) => value.options.is_some(),
+        Some(player::Spec::FuryWarrior(value)) => value.options.is_some(),
+        Some(player::Spec::ProtectionWarrior(value)) => value.options.is_some(),
+        None => false,
+    }
+}
+
+fn request_to_json(request: &RaidSimRequest) -> Value {
+    let raid = request.raid.as_ref();
+    let encounter = request.encounter.as_ref();
+    let sim_options = request.sim_options.as_ref();
+
+    let parties = raid
+        .map(|raid| {
+            raid.parties
+                .iter()
+                .enumerate()
+                .map(|(party_index, party)| {
+                    let players: Vec<Value> = party
+                        .players
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, player)| player.class != 0)
+                        .map(|(player_index, player)| {
+                            let equipment_items: Vec<Value> = player
+                                .equipment
+                                .as_ref()
+                                .map(|equipment| {
+                                    equipment
+                                        .items
+                                        .iter()
+                                        .map(|item| {
+                                            serde_json::json!({
+                                                "id": item.id,
+                                                "enchant": item.enchant,
+                                                "gems": item.gems,
+                                                "reforging": item.reforging,
+                                                "randomSuffix": item.random_suffix,
+                                                "upgradeStep": item.upgrade_step,
+                                                "challengeMode": item.challenge_mode,
+                                                "tinker": item.tinker,
+                                            })
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+
+                            serde_json::json!({
+                                "partyIndex": party_index,
+                                "playerIndex": player_index,
+                                "name": player.name,
+                                "class": player.class,
+                                "race": player.race,
+                                "apiVersion": player.api_version,
+                                "talentsString": player.talents_string,
+                                "spec": player_spec_label(&player.spec),
+                                "specOptionsPresent": spec_options_present(&player.spec),
+                                "rotationPresent": player.rotation.is_some(),
+                                "rotationApl": player.rotation.as_ref().map(apl_rotation_to_json),
+                                "consumables": player.consumables.as_ref().map(|consumables| serde_json::json!({
+                                    "prepotId": consumables.prepot_id,
+                                    "potId": consumables.pot_id,
+                                    "flaskId": consumables.flask_id,
+                                    "battleElixirId": consumables.battle_elixir_id,
+                                    "guardianElixirId": consumables.guardian_elixir_id,
+                                    "foodId": consumables.food_id,
+                                    "explosiveId": consumables.explosive_id,
+                                    "conjuredId": consumables.conjured_id,
+                                })),
+                                "bonusStats": player.bonus_stats.as_ref().map(|stats| serde_json::json!({
+                                    "apiVersion": stats.api_version,
+                                    "stats": stats.stats,
+                                    "pseudoStats": stats.pseudo_stats,
+                                })),
+                                "enableItemSwap": player.enable_item_swap,
+                                "itemSwapPresent": player.item_swap.is_some(),
+                                "individualBuffs": player.buffs.as_ref().map(individual_buffs_to_json),
+                                "profession1": player.profession1,
+                                "profession2": player.profession2,
+                                "cooldowns": player.cooldowns.as_ref().map(|cooldowns| serde_json::json!({
+                                    "count": cooldowns.cooldowns.len(),
+                                    "hpPercentForDefensives": cooldowns.hp_percent_for_defensives,
+                                })),
+                                "reactionTimeMs": player.reaction_time_ms,
+                                "channelClipDelayMs": player.channel_clip_delay_ms,
+                                "inFrontOfTarget": player.in_front_of_target,
+                                "distanceFromTarget": player.distance_from_target,
+                                "darkIntentUptime": player.dark_intent_uptime,
+                                "challengeMode": player.challenge_mode,
+                                "healingModelPresent": player.healing_model.is_some(),
+                                "equipment": {
+                                    "items": equipment_items,
+                                },
+                            })
+                        })
+                        .collect();
+
+                    serde_json::json!({
+                        "partyIndex": party_index,
+                        "players": players,
+                    })
+                })
+                .collect::<Vec<Value>>()
+        })
+        .unwrap_or_default();
+
+    let targets = encounter
+        .map(|encounter| {
+            encounter
+                .targets
+                .iter()
+                .map(|target| {
+                    serde_json::json!({
+                        "id": target.id,
+                        "name": target.name,
+                        "level": target.level,
+                        "mobType": target.mob_type,
+                        "stats": target.stats,
+                        "minBaseDamage": target.min_base_damage,
+                        "damageSpread": target.damage_spread,
+                        "swingSpeed": target.swing_speed,
+                        "tankIndex": target.tank_index,
+                    })
+                })
+                .collect::<Vec<Value>>()
+        })
+        .unwrap_or_default();
+
+    serde_json::json!({
+        "requestId": request.request_id,
+        "type": request.r#type,
+        "raid": {
+            "numActiveParties": raid.map(|r| r.num_active_parties).unwrap_or_default(),
+            "parties": parties,
+        },
+        "encounter": {
+            "apiVersion": encounter.map(|e| e.api_version).unwrap_or_default(),
+            "duration": encounter.map(|e| e.duration).unwrap_or_default(),
+            "durationVariation": encounter.map(|e| e.duration_variation).unwrap_or_default(),
+            "executeProportion20": encounter.map(|e| e.execute_proportion_20).unwrap_or_default(),
+            "executeProportion25": encounter.map(|e| e.execute_proportion_25).unwrap_or_default(),
+            "executeProportion35": encounter.map(|e| e.execute_proportion_35).unwrap_or_default(),
+            "executeProportion45": encounter.map(|e| e.execute_proportion_45).unwrap_or_default(),
+            "executeProportion90": encounter.map(|e| e.execute_proportion_90).unwrap_or_default(),
+            "useHealth": encounter.map(|e| e.use_health).unwrap_or_default(),
+            "targets": targets,
+        },
+        "simOptions": {
+            "iterations": sim_options.map(|s| s.iterations).unwrap_or_default(),
+            "randomSeed": sim_options.map(|s| s.random_seed).unwrap_or_default(),
+            "debug": sim_options.map(|s| s.debug).unwrap_or_default(),
+            "debugFirstIteration": sim_options.map(|s| s.debug_first_iteration).unwrap_or_default(),
+            "interactive": sim_options.map(|s| s.interactive).unwrap_or_default(),
+            "useLabeledRands": sim_options.map(|s| s.use_labeled_rands).unwrap_or_default(),
+        }
+    })
+}
+
 fn maybe_log_request_json(run_id: Uuid, request: &RaidSimRequest) {
     let enabled = std::env::var("LOG_SIM_REQUEST_JSON")
         .map(|value| {
@@ -109,6 +482,25 @@ fn build_default_request(run: &db::SimulationRun, run_id: Uuid) -> Result<RaidSi
     let mapped_player = build_player_from_run(run)?;
     let mut raid = default_mop_raid();
     raid.parties[0].players[0] = mapped_player;
+
+    if let Some(payload) = extract_raid_buffs_payload(&run.gear_payload) {
+        raid.buffs = Some(parse_protojson_message::<RaidBuffs>(
+            "proto.RaidBuffs",
+            payload,
+        )?);
+    }
+    if let Some(payload) = extract_debuffs_payload(&run.gear_payload) {
+        raid.debuffs = Some(parse_protojson_message::<Debuffs>(
+            "proto.Debuffs",
+            payload,
+        )?);
+    }
+    if let Some(payload) = extract_party_buffs_payload(&run.gear_payload) {
+        raid.parties[0].buffs = Some(parse_protojson_message::<PartyBuffs>(
+            "proto.PartyBuffs",
+            payload,
+        )?);
+    }
 
     Ok(RaidSimRequest {
         request_id: run_id.to_string(),
@@ -387,7 +779,50 @@ pub async fn run_async_simulation(
 mod tests {
     use super::*;
     use chrono::Utc;
-    use serde_json::Value;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn preserves_exported_raid_debuff_and_party_buffs() {
+        let mut payload: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/gear-profile.json"))
+                .expect("fixture must be valid JSON");
+        payload["raidBuffs"] = json!({ "hornOfWinter": true });
+        payload["debuffs"] = json!({ "weakenedArmor": true });
+        payload["partyBuffs"] = json!({});
+
+        let run = db::SimulationRun {
+            run_id: Uuid::new_v4(),
+            discord_user_id: "buff-test".to_string(),
+            class: "mage".to_string(),
+            spec: "arcane".to_string(),
+            gear_payload: payload,
+            input_format: "gear-json".to_string(),
+            upstream_revision: None,
+            normalized_request: None,
+            effective_random_seed: None,
+            effective_iterations: None,
+            raid_members: Vec::new(),
+            status: "queued".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let request =
+            build_default_request(&run, run.run_id).expect("fixture must build a default request");
+        let raid = request.raid.expect("request must include a raid");
+
+        assert!(
+            raid.buffs
+                .expect("raid buffs must be preserved")
+                .horn_of_winter
+        );
+        assert!(
+            raid.debuffs
+                .expect("debuffs must be preserved")
+                .weakened_armor
+        );
+        assert!(raid.parties[0].buffs.is_some());
+    }
 
     #[tokio::test]
     #[ignore = "requires a running WoWSims async API at WOWSIMS_API_BASE_URL"]
