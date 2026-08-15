@@ -8,6 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::RwLock;
+use tracing::debug;
 
 const TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(30);
 const REPORT_PAGE_LIMIT: i32 = 100;
@@ -283,6 +284,11 @@ impl WarcraftLogsClient {
             .build()
             .context("failed to build Warcraft Logs HTTP client")?;
 
+        debug!(
+            "Warcraft Logs client configured with client_id={:?}, oauth_url_override={:?}, graphql_url_override={:?}",
+            config.client_id, oauth_url_override, graphql_url_override
+        );
+
         Ok(Self {
             inner: Arc::new(ClientInner {
                 http,
@@ -302,6 +308,7 @@ impl WarcraftLogsClient {
         server_slug: &str,
         region: &str,
     ) -> Result<Option<WarcraftLogsGuild>> {
+        debug!("Attempting to lookup guild {name} on {server_slug}.{region} at {site:?}");
         let data: GuildLookupData = self
             .graphql(
                 site,
@@ -314,6 +321,7 @@ impl WarcraftLogsClient {
             )
             .await?;
 
+        debug!("Got guild {:?} from Warcraft Logs", data.guild_data.guild);
         Ok(data.guild_data.guild)
     }
 
@@ -322,10 +330,12 @@ impl WarcraftLogsClient {
         site: WarcraftLogsSite,
         guild_id: i64,
     ) -> Result<Option<WarcraftLogsGuild>> {
+        debug!("Attempting to lookup guild with id {guild_id} at {site:?}");
         let data: GuildLookupData = self
             .graphql(site, GUILD_BY_ID_QUERY, GuildByIdVariables { id: guild_id })
             .await?;
 
+        debug!("Got guild {:?} from Warcraft Logs", data.guild_data.guild);
         Ok(data.guild_data.guild)
     }
 
@@ -340,6 +350,9 @@ impl WarcraftLogsClient {
         let mut reports = Vec::new();
 
         let rate_limit = loop {
+            debug!(
+                "Attempting to fetch reports for guild {guild_id} at {site:?}, page {page}. Time window: {start_time_ms} to {end_time_ms}"
+            );
             let data: GuildReportsData = self
                 .graphql(
                     site,
@@ -353,6 +366,7 @@ impl WarcraftLogsClient {
                     },
                 )
                 .await?;
+            debug!("Done fetching reports for guild {guild_id} at {site:?}.");
             let report_page = data.report_data.reports;
             reports.extend(report_page.data);
 
@@ -684,24 +698,32 @@ pub struct ReportDiscovery {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RateLimitInfo {
-    pub limit_per_hour: i32,
-    pub points_spent_this_hour: i32,
-    pub points_reset_in: i32,
+    pub limit_per_hour: f64,
+    pub points_spent_this_hour: f64,
+    pub points_reset_in: f64,
 }
 
 impl RateLimitInfo {
-    pub fn remaining(&self) -> i32 {
-        (self.limit_per_hour - self.points_spent_this_hour).max(0)
+    pub fn remaining(&self) -> f64 {
+        (self.limit_per_hour - self.points_spent_this_hour).max(0.0)
     }
 
     pub fn recommended_delay(&self, normal: Duration) -> Duration {
-        if self.limit_per_hour <= 0 || self.remaining() > self.limit_per_hour / 10 {
+        if !self.limit_per_hour.is_finite()
+            || !self.points_spent_this_hour.is_finite()
+            || !self.points_reset_in.is_finite()
+            || self.limit_per_hour <= 0.0
+            || self.remaining() > self.limit_per_hour / 10.0
+        {
             return normal;
         }
 
-        let remaining = self.remaining().max(1) as u64;
-        let reset_secs = self.points_reset_in.max(1) as u64;
-        normal.max(Duration::from_secs(reset_secs / remaining))
+        let delay_secs = self.points_reset_in.max(1.0) / self.remaining().max(1.0);
+        if delay_secs > Duration::MAX.as_secs_f64() {
+            return Duration::MAX;
+        }
+
+        normal.max(Duration::from_secs_f64(delay_secs))
     }
 }
 
@@ -996,9 +1018,9 @@ mod tests {
     #[test]
     fn increases_delay_when_hourly_points_are_low() {
         let rate_limit = RateLimitInfo {
-            limit_per_hour: 100,
-            points_spent_this_hour: 99,
-            points_reset_in: 600,
+            limit_per_hour: 100.0,
+            points_spent_this_hour: 99.0,
+            points_reset_in: 600.0,
         };
 
         assert_eq!(
@@ -1041,7 +1063,7 @@ mod tests {
                     },
                     "rateLimitData": {
                         "limitPerHour": 1000,
-                        "pointsSpentThisHour": 10,
+                        "pointsSpentThisHour": 11.03,
                         "pointsResetIn": 3000
                     }
                 }
@@ -1066,7 +1088,7 @@ mod tests {
                     },
                     "rateLimitData": {
                         "limitPerHour": 1000,
-                        "pointsSpentThisHour": 20,
+                        "pointsSpentThisHour": 20.75,
                         "pointsResetIn": 2990
                     }
                 }
@@ -1094,7 +1116,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["first", "second"]
         );
-        assert_eq!(discovery.rate_limit.points_spent_this_hour, 20);
+        assert_eq!(discovery.rate_limit.points_spent_this_hour, 20.75);
 
         let requests = requests.await.unwrap();
         assert_eq!(requests.len(), 3);
