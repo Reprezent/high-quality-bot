@@ -891,6 +891,7 @@ fn with_default_spec_options(spec: player::Spec) -> player::Spec {
             if value.options.is_none() {
                 value.options = Some(frost_death_knight::Options {
                     class_options: Some(DeathKnightOptions::default()),
+                    ..Default::default()
                 });
             }
             player::Spec::FrostDeathKnight(value)
