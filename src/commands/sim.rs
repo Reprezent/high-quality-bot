@@ -1,13 +1,15 @@
 use crate::Context;
 use crate::db;
+use crate::sim_request_codec::{INPUT_FORMAT_GEAR_JSON, MOP_UPSTREAM_REVISION};
 use anyhow::Result;
 use serde_json::Value;
+use uuid::Uuid;
 
 fn normalize_class(value: &str) -> String {
     value
         .trim()
         .trim_start_matches("Class")
-        .to_lowercase()
+        .to_ascii_lowercase()
         .replace('_', "")
         .replace('-', "")
 }
@@ -17,12 +19,11 @@ fn extract_class_spec_from_payload(payload: &Value) -> Option<(String, String)> 
         payload.get("class").and_then(|value| value.as_str()),
         payload.get("spec").and_then(|value| value.as_str()),
     ) {
-        return Some((normalize_class(class), spec.trim().to_lowercase()));
+        return Some((normalize_class(class), spec.trim().to_ascii_lowercase()));
     }
 
     let player = payload.get("player")?.as_object()?;
     let class = player.get("class")?.as_str()?;
-
     let spec = if player.contains_key("bloodDeathKnight") {
         "blood"
     } else if player.contains_key("frostDeathKnight") {
@@ -106,40 +107,55 @@ fn format_metric(value: f64) -> String {
     }
 }
 
-/// Run a World of Warcraft simulation from a WoWSims JSON payload.
+/// Run a World of Warcraft simulation from a gear profile.
 ///
-/// Usage: `/sim <json payload>`
+/// Usage: `/sim <gear_json>`
 #[poise::command(slash_command, rename = "sim")]
 pub async fn sim(
     ctx: Context<'_>,
-    #[description = "WoWSims JSON payload (must include player.class + spec)"] gear_json: String,
+    #[description = "Gear profile JSON (must include class, spec, and gear.items)"]
+    gear_json: String,
 ) -> Result<()> {
-    // Parse gear JSON
-    let gear_payload: serde_json::Value = match serde_json::from_str(&gear_json) {
-        Ok(v) => v,
-        Err(_) => {
-            ctx.say("❌ The gear payload is not valid JSON. Please check your input.")
+    let source_payload = match serde_json::from_str(&gear_json) {
+        Ok(payload) => payload,
+        Err(error) => {
+            ctx.say(format!("❌ The gear profile is not valid JSON: {}", error))
                 .await?;
             return Ok(());
         }
     };
 
-    let Some((class, spec)) = extract_class_spec_from_payload(&gear_payload) else {
+    let Some((class, spec)) = extract_class_spec_from_payload(&source_payload) else {
         ctx.say(
-            "❌ Could not determine class/spec from payload. Include `player.class` and a spec section like `frostMage`, `armsWarrior`, etc.",
+            "❌ Could not determine class/spec. Include top-level `class` and `spec`, or a WoWSims `player` object with its spec section.",
         )
         .await?;
         return Ok(());
     };
 
+    let run_id = Uuid::new_v4();
     let user_id = ctx.author().id.to_string();
     let user_id_for_reply = ctx.author().id;
     let channel_id = ctx.channel_id();
     let http = ctx.serenity_context().http.clone();
     let pool = &ctx.data().db;
 
-    // Save run to database
-    let run_id = db::create_simulation_run(pool, &user_id, &class, &spec, &gear_payload).await?;
+    db::create_simulation_run(
+        pool,
+        &db::NewSimulationRun {
+            run_id,
+            discord_user_id: &user_id,
+            class: &class,
+            spec: &spec,
+            source_payload: &source_payload,
+            input_format: INPUT_FORMAT_GEAR_JSON,
+            upstream_revision: Some(MOP_UPSTREAM_REVISION),
+            normalized_request: None,
+            effective_random_seed: None,
+            effective_iterations: None,
+        },
+    )
+    .await?;
 
     let pool_for_task = pool.clone();
     let sim_api_base_url = ctx.data().sim_api_base_url.clone();
@@ -218,10 +234,46 @@ pub async fn sim(
 
     // Acknowledge quickly so Discord doesn't time out
     ctx.say(format!(
-        "✅ Got your sim request for **{class}/{spec}**!\n\
-         • Run ID: `{run_id}`"
+        "✅ Got your gear profile for **{class}/{spec}**!\n\
+         • Server defaults will supply raid buffs, encounter, sim options, and missing player settings.\n\
+         • Run ID: `{run_id}`",
     ))
     .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn reads_class_and_spec_from_a_flat_gear_profile() {
+        let payload = json!({
+            "class": "mage",
+            "spec": "arcane",
+            "gear": { "items": [] },
+        });
+
+        assert_eq!(
+            extract_class_spec_from_payload(&payload),
+            Some(("mage".to_string(), "arcane".to_string()))
+        );
+    }
+
+    #[test]
+    fn reads_class_and_spec_from_a_wowsims_player_payload() {
+        let payload = json!({
+            "player": {
+                "class": "ClassMage",
+                "arcaneMage": {},
+            },
+        });
+
+        assert_eq!(
+            extract_class_spec_from_payload(&payload),
+            Some(("mage".to_string(), "arcane".to_string()))
+        );
+    }
 }

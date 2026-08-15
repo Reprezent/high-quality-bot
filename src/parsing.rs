@@ -12,7 +12,7 @@ use crate::mop_proto::mop::{
     EnhancementShaman, EquipmentSpec, FeralDruid, FireMage, FrostDeathKnight, FrostMage,
     FuryWarrior, Glyphs, GuardianDruid, HolyPaladin, HolyPriest, HunterOptions, ItemLevelState,
     ItemSpec, MageArmor, MageOptions, MarksmanshipHunter, MistweaverMonk, MonkOptions,
-    PaladinOptions, Player, PriestOptions, ProtectionPaladin, ProtectionWarrior, Race,
+    PaladinOptions, Player, PriestOptions, Profession, ProtectionPaladin, ProtectionWarrior, Race,
     RestorationDruid, RestorationShaman, RetributionPaladin, RogueOptions, ShadowPriest,
     ShamanOptions, SubtletyRogue, SurvivalHunter, UnholyDeathKnight, WarlockOptions,
     WarriorOptions, WindwalkerMonk, affliction_warlock, arcane_mage, arms_warrior,
@@ -26,6 +26,7 @@ use crate::mop_proto::mop::{
 };
 
 const PLAYER_API_VERSION: i32 = 54;
+const EQUIPMENT_SLOT_COUNT: usize = 16;
 
 fn parse_i32(value: Option<&Value>) -> Option<i32> {
     value
@@ -67,6 +68,16 @@ fn parse_item_spec(value: &Value) -> Option<ItemSpec> {
             .unwrap_or(false),
         tinker: parse_i32(item.get("tinker")).unwrap_or(0),
     })
+}
+
+fn parse_equipment_items(entries: &[Value]) -> Vec<ItemSpec> {
+    let mut items: Vec<ItemSpec> = entries
+        .iter()
+        .take(EQUIPMENT_SLOT_COUNT)
+        .map(|entry| parse_item_spec(entry).unwrap_or_default())
+        .collect();
+    items.resize(EQUIPMENT_SLOT_COUNT, ItemSpec::default());
+    items
 }
 
 fn parse_equipment_spec(gear_payload: &Value) -> EquipmentSpec {
@@ -126,21 +137,21 @@ fn parse_equipment_spec(gear_payload: &Value) -> EquipmentSpec {
         .and_then(|items| items.as_array());
 
     let items = if let Some(entries) = nested_player_items {
-        entries.iter().filter_map(parse_item_spec).collect()
+        parse_equipment_items(entries)
     } else if let Some(entries) = nested_player_gear_items {
-        entries.iter().filter_map(parse_item_spec).collect()
+        parse_equipment_items(entries)
     } else if let Some(entries) = nested_gear_items {
-        entries.iter().filter_map(parse_item_spec).collect()
+        parse_equipment_items(entries)
     } else if let Some(entries) = nested_equipment_items {
-        entries.iter().filter_map(parse_item_spec).collect()
+        parse_equipment_items(entries)
     } else if let Some(entries) = nested_settings_player_items {
-        entries.iter().filter_map(parse_item_spec).collect()
+        parse_equipment_items(entries)
     } else if let Some(entries) = nested_raid_player_items {
-        entries.iter().filter_map(parse_item_spec).collect()
+        parse_equipment_items(entries)
     } else if let Some(entries) = nested_raid_settings_player_items {
-        entries.iter().filter_map(parse_item_spec).collect()
+        parse_equipment_items(entries)
     } else if let Some(entries) = gear_payload.get("items").and_then(|value| value.as_array()) {
-        entries.iter().filter_map(parse_item_spec).collect()
+        parse_equipment_items(entries)
     } else if let Some(payload_object) = gear_payload.as_object() {
         payload_object
             .values()
@@ -151,6 +162,99 @@ fn parse_equipment_spec(gear_payload: &Value) -> EquipmentSpec {
     };
 
     EquipmentSpec { items }
+}
+
+fn string_field<'a>(payload: &'a Value, field: &str) -> Option<&'a str> {
+    payload
+        .get(field)
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            payload
+                .get("player")
+                .and_then(|player| player.get(field))
+                .and_then(|value| value.as_str())
+        })
+}
+
+fn normalize_identifier(value: &str, prefix: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches(prefix)
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(|character| character.to_lowercase())
+        .collect()
+}
+
+fn parse_race(payload: &Value) -> Option<i32> {
+    let value = string_field(payload, "race")?;
+    let race = match normalize_identifier(value, "Race").as_str() {
+        "bloodelf" => Race::BloodElf,
+        "draenei" => Race::Draenei,
+        "dwarf" => Race::Dwarf,
+        "gnome" => Race::Gnome,
+        "human" => Race::Human,
+        "nightelf" => Race::NightElf,
+        "orc" => Race::Orc,
+        "tauren" => Race::Tauren,
+        "troll" => Race::Troll,
+        "undead" => Race::Undead,
+        "worgen" => Race::Worgen,
+        "goblin" => Race::Goblin,
+        "alliancepandaren" => Race::AlliancePandaren,
+        "hordepandaren" => Race::HordePandaren,
+        _ => return None,
+    };
+
+    Some(race as i32)
+}
+
+fn parse_profession(value: &Value) -> Option<i32> {
+    parse_i32(Some(value)).or_else(|| {
+        let value = value.as_str()?;
+        let profession = match normalize_identifier(value, "Profession").as_str() {
+            "alchemy" => Profession::Alchemy,
+            "blacksmithing" => Profession::Blacksmithing,
+            "enchanting" => Profession::Enchanting,
+            "engineering" => Profession::Engineering,
+            "herbalism" => Profession::Herbalism,
+            "inscription" => Profession::Inscription,
+            "jewelcrafting" => Profession::Jewelcrafting,
+            "leatherworking" => Profession::Leatherworking,
+            "mining" => Profession::Mining,
+            "skinning" => Profession::Skinning,
+            "tailoring" => Profession::Tailoring,
+            "archeology" => Profession::Archeology,
+            _ => return None,
+        };
+        Some(profession as i32)
+    })
+}
+
+fn parse_professions(payload: &Value) -> (i32, i32) {
+    let direct_profession = |field| {
+        payload
+            .get(field)
+            .or_else(|| payload.get("player").and_then(|player| player.get(field)))
+            .and_then(parse_profession)
+    };
+
+    let listed_professions = payload
+        .get("professions")
+        .and_then(|value| value.as_array());
+    let listed_profession = |index: usize| {
+        let profession = listed_professions?.get(index)?;
+        parse_profession(profession.get("name").unwrap_or(profession))
+    };
+
+    (
+        direct_profession("profession1")
+            .or_else(|| listed_profession(0))
+            .unwrap_or(Profession::Unknown as i32),
+        direct_profession("profession2")
+            .or_else(|| listed_profession(1))
+            .unwrap_or(Profession::Unknown as i32),
+    )
 }
 
 fn parse_talents_string(payload: &Value) -> String {
@@ -1152,20 +1256,32 @@ fn with_spec_specific_defaults(spec: player::Spec) -> player::Spec {
     }
 }
 
-pub fn build_player_from_run(run: &db::SimulationRun) -> Result<Player> {
-    let class = run.class.trim().to_lowercase();
-    let spec = run.spec.trim().to_lowercase();
-    let (class_id, race_id, spec_oneof) = resolve_player_spec(&class, &spec)?;
+pub fn build_player_from_payload(
+    discord_user_id: &str,
+    class: &str,
+    spec: &str,
+    payload: &Value,
+) -> Result<Player> {
+    let class = class.trim().to_lowercase();
+    let spec = spec.trim().to_lowercase();
+    let (class_id, default_race_id, spec_oneof) = resolve_player_spec(&class, &spec)?;
     let spec_oneof = with_default_spec_options(spec_oneof);
     let spec_oneof = with_spec_specific_defaults(spec_oneof);
 
-    let player_name = if run.discord_user_id.is_empty() {
-        format!("{}/{}", class, spec)
-    } else {
-        format!("user-{}", run.discord_user_id)
-    };
+    let player_name = string_field(payload, "name")
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if discord_user_id.is_empty() {
+                format!("{class}/{spec}")
+            } else {
+                format!("user-{discord_user_id}")
+            }
+        });
+    let (profession1, profession2) = parse_professions(payload);
 
-    let rotation = match load_rotation_from_payload(&run.gear_payload) {
+    let rotation = match load_rotation_from_payload(payload) {
         Ok(Some(value)) => Some(value),
         Ok(None) => Some(load_vendor_default_rotation(&class, &spec)?),
         Err(error) => {
@@ -1182,13 +1298,60 @@ pub fn build_player_from_run(run: &db::SimulationRun) -> Result<Player> {
     Ok(Player {
         api_version: PLAYER_API_VERSION,
         name: player_name,
-        race: race_id,
+        race: parse_race(payload).unwrap_or(default_race_id),
         class: class_id,
-        equipment: Some(parse_equipment_spec(&run.gear_payload)),
-        glyphs: Some(parse_glyphs(&run.gear_payload)),
-        talents_string: parse_talents_string(&run.gear_payload),
+        equipment: Some(parse_equipment_spec(payload)),
+        glyphs: Some(parse_glyphs(payload)),
+        talents_string: parse_talents_string(payload),
+        profession1,
+        profession2,
         rotation,
         spec: Some(spec_oneof),
         ..Default::default()
     })
+}
+
+pub fn build_player_from_run(run: &db::SimulationRun) -> Result<Player> {
+    build_player_from_payload(
+        &run.discord_user_id,
+        &run.class,
+        &run.spec,
+        &run.gear_payload,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture() -> Value {
+        serde_json::from_str(include_str!("../tests/fixtures/gear-profile.json"))
+            .expect("fixture must be valid JSON")
+    }
+
+    #[test]
+    fn preserves_warcraft_logs_player_and_gear_fields() {
+        let player = build_player_from_payload("discord-user", "mage", "arcane", &fixture())
+            .expect("fixture must build a player");
+        let equipment = player.equipment.expect("player must have equipment");
+        let glyphs = player.glyphs.expect("player must have glyphs");
+
+        assert_eq!(player.name, "Autismowismo");
+        assert_eq!(player.race, Race::NightElf as i32);
+        assert_eq!(player.profession1, Profession::Enchanting as i32);
+        assert_eq!(player.profession2, Profession::Tailoring as i32);
+        assert_eq!(player.talents_string, "311222");
+        assert_eq!(glyphs.major1, 146659);
+        assert_eq!(glyphs.major2, 115705);
+        assert_eq!(glyphs.major3, 62210);
+        assert_eq!(glyphs.minor1, 63093);
+        assert_eq!(glyphs.minor2, 56363);
+        assert_eq!(equipment.items.len(), EQUIPMENT_SLOT_COUNT);
+        assert_eq!(equipment.items[0].id, 103900);
+        assert_eq!(equipment.items[0].gems, vec![95347, 76700]);
+        assert_eq!(equipment.items[2].enchant, 4806);
+        assert_eq!(equipment.items[14].id, 103874);
+        assert_eq!(equipment.items[15].id, 0);
+        assert!(player.rotation.is_some());
+    }
 }
