@@ -6,6 +6,8 @@ use sqlx::{
 };
 use uuid::Uuid;
 
+use crate::warcraft_logs::WarcraftLogsSite;
+
 /// Establish a connection pool to PostgreSQL and run migrations.
 pub async fn create_pool(connect_options: PgConnectOptions) -> Result<PgPool> {
     let pool = PgPoolOptions::new()
@@ -22,6 +24,10 @@ pub async fn create_pool(connect_options: PgConnectOptions) -> Result<PgPool> {
         .await?;
 
     sqlx::raw_sql(include_str!("../migrations/003_sim_request_audit.sql"))
+        .execute(&pool)
+        .await?;
+
+    sqlx::raw_sql(include_str!("../migrations/004_warcraft_logs.sql"))
         .execute(&pool)
         .await?;
 
@@ -279,6 +285,637 @@ pub async fn get_latest_simulation_progress_frame(
 }
 
 // ---------------------------------------------------------------------------
+// Warcraft Logs tracking
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub struct WclReportRecord {
+    pub code: String,
+    pub title: String,
+    pub start_time_ms: i64,
+    pub end_time_ms: Option<i64>,
+    pub revision: i32,
+    pub zone_name: Option<String>,
+    pub visibility: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct WclSubscription {
+    pub id: i64,
+    pub discord_guild_id: String,
+    pub discord_channel_id: String,
+    pub wcl_guild_id: i64,
+    pub wcl_site: WarcraftLogsSite,
+    pub wcl_guild_name: String,
+    pub server_name: String,
+    pub region: String,
+    pub discovery_cursor_ms: i64,
+    pub last_polled_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct WclReportToAnnounce {
+    pub subscription_id: i64,
+    pub discord_channel_id: String,
+    pub wcl_site: WarcraftLogsSite,
+    pub wcl_guild_name: String,
+    pub code: String,
+    pub title: String,
+    pub start_time_ms: i64,
+    pub zone_name: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct WclReportToInspect {
+    pub subscription_id: i64,
+    pub code: String,
+    pub baseline_scanned: bool,
+    pub suppress_initial_kills: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct WclFightRecord {
+    pub fight_id: i32,
+    pub boss_name: String,
+    pub difficulty: Option<i32>,
+    pub raid_size: Option<i32>,
+    pub average_item_level: Option<f64>,
+    pub start_time_ms: i64,
+    pub end_time_ms: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct WclPendingFight {
+    pub subscription_id: i64,
+    pub discord_channel_id: String,
+    pub wcl_site: WarcraftLogsSite,
+    pub wcl_guild_name: String,
+    pub report_code: String,
+    pub report_title: String,
+    pub report_start_time_ms: i64,
+    pub fight: WclFightRecord,
+}
+
+pub struct NewWclSubscription<'a> {
+    pub discord_guild_id: &'a str,
+    pub discord_channel_id: &'a str,
+    pub wcl_guild_id: i64,
+    pub wcl_site: WarcraftLogsSite,
+    pub wcl_guild_name: &'a str,
+    pub server_slug: &'a str,
+    pub server_name: &'a str,
+    pub region: &'a str,
+    pub baseline_time_ms: i64,
+}
+
+pub async fn replace_wcl_subscription(
+    pool: &PgPool,
+    subscription: NewWclSubscription<'_>,
+    baseline_reports: &[WclReportRecord],
+    baseline_fights: &[(String, Vec<WclFightRecord>)],
+) -> Result<i64> {
+    let mut transaction = pool.begin().await?;
+
+    sqlx::query(
+        r#"
+        DELETE FROM warcraft_logs_subscriptions
+        WHERE discord_guild_id = $1
+        "#,
+    )
+    .bind(subscription.discord_guild_id)
+    .execute(&mut *transaction)
+    .await?;
+
+    let row = sqlx::query(
+        r#"
+        INSERT INTO warcraft_logs_subscriptions (
+            discord_guild_id, discord_channel_id, wcl_guild_id, wcl_site,
+            wcl_guild_name, server_slug, server_name, region,
+            baseline_time_ms, discovery_cursor_ms
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+        RETURNING id
+        "#,
+    )
+    .bind(subscription.discord_guild_id)
+    .bind(subscription.discord_channel_id)
+    .bind(subscription.wcl_guild_id)
+    .bind(subscription.wcl_site.slug())
+    .bind(subscription.wcl_guild_name)
+    .bind(subscription.server_slug)
+    .bind(subscription.server_name)
+    .bind(subscription.region)
+    .bind(subscription.baseline_time_ms)
+    .fetch_one(&mut *transaction)
+    .await?;
+    let subscription_id: i64 = row.get("id");
+
+    for report in baseline_reports {
+        let is_recent = report
+            .end_time_ms
+            .is_none_or(|end_time| end_time >= subscription.baseline_time_ms - 30 * 60 * 1_000);
+        let initial_fights = baseline_fights
+            .iter()
+            .find(|(report_code, _)| report_code == &report.code)
+            .map(|(_, fights)| fights);
+        let baseline_scanned = !is_recent || initial_fights.is_some();
+        sqlx::query(
+            r#"
+            INSERT INTO warcraft_logs_reports (
+                subscription_id, code, title, start_time_ms, end_time_ms,
+                revision, zone_name, visibility, announcement_state,
+                baseline_scanned, track_until
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, 'suppressed', $9,
+                CASE WHEN $10 THEN NOW() + INTERVAL '12 hours' ELSE NOW() END
+            )
+            "#,
+        )
+        .bind(subscription_id)
+        .bind(&report.code)
+        .bind(&report.title)
+        .bind(report.start_time_ms)
+        .bind(report.end_time_ms)
+        .bind(report.revision)
+        .bind(&report.zone_name)
+        .bind(&report.visibility)
+        .bind(baseline_scanned)
+        .bind(is_recent)
+        .execute(&mut *transaction)
+        .await?;
+
+        if let Some(fights) = initial_fights {
+            for fight in fights {
+                sqlx::query(
+                    r#"
+                    INSERT INTO warcraft_logs_fights (
+                        subscription_id, report_code, fight_id, boss_name, difficulty,
+                        raid_size, average_item_level, start_time_ms, end_time_ms,
+                        announcement_state
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'suppressed')
+                    "#,
+                )
+                .bind(subscription_id)
+                .bind(&report.code)
+                .bind(fight.fight_id)
+                .bind(&fight.boss_name)
+                .bind(fight.difficulty)
+                .bind(fight.raid_size)
+                .bind(fight.average_item_level)
+                .bind(fight.start_time_ms)
+                .bind(fight.end_time_ms)
+                .execute(&mut *transaction)
+                .await?;
+            }
+        }
+    }
+
+    transaction.commit().await?;
+    Ok(subscription_id)
+}
+
+pub async fn remove_wcl_subscription(pool: &PgPool, discord_guild_id: &str) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        DELETE FROM warcraft_logs_subscriptions
+        WHERE discord_guild_id = $1
+        "#,
+    )
+    .bind(discord_guild_id)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn get_wcl_subscription(
+    pool: &PgPool,
+    discord_guild_id: &str,
+) -> Result<Option<WclSubscription>> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, discord_guild_id, discord_channel_id, wcl_guild_id, wcl_site,
+               wcl_guild_name, server_name, region, discovery_cursor_ms,
+               last_polled_at, last_error
+        FROM warcraft_logs_subscriptions
+        WHERE discord_guild_id = $1 AND enabled = TRUE
+        "#,
+    )
+    .bind(discord_guild_id)
+    .fetch_optional(pool)
+    .await?;
+
+    row.map(|row| wcl_subscription_from_row(&row)).transpose()
+}
+
+pub async fn list_wcl_subscriptions(pool: &PgPool) -> Result<Vec<WclSubscription>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, discord_guild_id, discord_channel_id, wcl_guild_id, wcl_site,
+               wcl_guild_name, server_name, region, discovery_cursor_ms,
+               last_polled_at, last_error
+        FROM warcraft_logs_subscriptions
+        WHERE enabled = TRUE
+        ORDER BY id
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    rows.iter().map(wcl_subscription_from_row).collect()
+}
+
+fn wcl_subscription_from_row(row: &sqlx::postgres::PgRow) -> Result<WclSubscription> {
+    Ok(WclSubscription {
+        id: row.get("id"),
+        discord_guild_id: row.get("discord_guild_id"),
+        discord_channel_id: row.get("discord_channel_id"),
+        wcl_guild_id: row.get("wcl_guild_id"),
+        wcl_site: WarcraftLogsSite::from_slug(row.get("wcl_site"))?,
+        wcl_guild_name: row.get("wcl_guild_name"),
+        server_name: row.get("server_name"),
+        region: row.get("region"),
+        discovery_cursor_ms: row.get("discovery_cursor_ms"),
+        last_polled_at: row.get("last_polled_at"),
+        last_error: row.get("last_error"),
+    })
+}
+
+pub async fn reconcile_wcl_reports(
+    pool: &PgPool,
+    subscription_id: i64,
+    reports: &[WclReportRecord],
+    discovery_cursor_ms: i64,
+) -> Result<()> {
+    let mut transaction = pool.begin().await?;
+
+    for report in reports {
+        sqlx::query(
+            r#"
+            INSERT INTO warcraft_logs_reports (
+                subscription_id, code, title, start_time_ms, end_time_ms,
+                revision, zone_name, visibility, announcement_state
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')
+            ON CONFLICT (subscription_id, code) DO UPDATE
+            SET title = EXCLUDED.title,
+                start_time_ms = EXCLUDED.start_time_ms,
+                end_time_ms = EXCLUDED.end_time_ms,
+                zone_name = EXCLUDED.zone_name,
+                visibility = EXCLUDED.visibility,
+                track_until = CASE
+                    WHEN EXCLUDED.revision > warcraft_logs_reports.revision
+                        THEN GREATEST(
+                            warcraft_logs_reports.track_until,
+                            NOW() + INTERVAL '2 hours'
+                        )
+                    ELSE warcraft_logs_reports.track_until
+                END,
+                revision = GREATEST(warcraft_logs_reports.revision, EXCLUDED.revision),
+                updated_at = NOW()
+            "#,
+        )
+        .bind(subscription_id)
+        .bind(&report.code)
+        .bind(&report.title)
+        .bind(report.start_time_ms)
+        .bind(report.end_time_ms)
+        .bind(report.revision)
+        .bind(&report.zone_name)
+        .bind(&report.visibility)
+        .execute(&mut *transaction)
+        .await?;
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE warcraft_logs_subscriptions
+        SET discovery_cursor_ms = GREATEST(discovery_cursor_ms, $2),
+            last_polled_at = NOW(),
+            updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(subscription_id)
+    .bind(discovery_cursor_ms)
+    .execute(&mut *transaction)
+    .await?;
+
+    transaction.commit().await?;
+    Ok(())
+}
+
+pub async fn list_wcl_reports_to_announce(
+    pool: &PgPool,
+    subscription_id: i64,
+) -> Result<Vec<WclReportToAnnounce>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT s.id AS subscription_id, s.discord_channel_id, s.wcl_site, s.wcl_guild_name,
+               r.code, r.title, r.start_time_ms, r.zone_name
+        FROM warcraft_logs_reports r
+        JOIN warcraft_logs_subscriptions s ON s.id = r.subscription_id
+        WHERE r.subscription_id = $1
+          AND r.announcement_state = 'pending'
+        ORDER BY r.start_time_ms, r.code
+        "#,
+    )
+    .bind(subscription_id)
+    .fetch_all(pool)
+    .await?;
+
+    rows.iter()
+        .map(|row| {
+            Ok(WclReportToAnnounce {
+                subscription_id: row.get("subscription_id"),
+                discord_channel_id: row.get("discord_channel_id"),
+                wcl_site: WarcraftLogsSite::from_slug(row.get("wcl_site"))?,
+                wcl_guild_name: row.get("wcl_guild_name"),
+                code: row.get("code"),
+                title: row.get("title"),
+                start_time_ms: row.get("start_time_ms"),
+                zone_name: row.get("zone_name"),
+            })
+        })
+        .collect()
+}
+
+pub async fn mark_wcl_report_posted(
+    pool: &PgPool,
+    subscription_id: i64,
+    code: &str,
+    message_id: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE warcraft_logs_reports
+        SET announcement_state = 'posted', report_message_id = $3,
+            last_error = NULL, updated_at = NOW()
+        WHERE subscription_id = $1 AND code = $2
+        "#,
+    )
+    .bind(subscription_id)
+    .bind(code)
+    .bind(message_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn set_wcl_report_error(
+    pool: &PgPool,
+    subscription_id: i64,
+    code: &str,
+    error: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE warcraft_logs_reports
+        SET last_error = $3, updated_at = NOW()
+        WHERE subscription_id = $1 AND code = $2
+        "#,
+    )
+    .bind(subscription_id)
+    .bind(code)
+    .bind(error)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn list_wcl_reports_to_inspect(
+    pool: &PgPool,
+    subscription_id: i64,
+) -> Result<Vec<WclReportToInspect>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT subscription_id, code, baseline_scanned,
+               announcement_state = 'suppressed' AS suppress_initial_kills
+        FROM warcraft_logs_reports
+        WHERE subscription_id = $1
+          AND track_until > NOW()
+        ORDER BY COALESCE(last_inspected_at, '-infinity'::timestamptz), start_time_ms
+        "#,
+    )
+    .bind(subscription_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .iter()
+        .map(|row| WclReportToInspect {
+            subscription_id: row.get("subscription_id"),
+            code: row.get("code"),
+            baseline_scanned: row.get("baseline_scanned"),
+            suppress_initial_kills: row.get("suppress_initial_kills"),
+        })
+        .collect())
+}
+
+pub async fn record_wcl_fights(
+    pool: &PgPool,
+    subscription_id: i64,
+    report_code: &str,
+    report_revision: i32,
+    report_end_time_ms: Option<i64>,
+    fights: &[WclFightRecord],
+    suppress_new_fights: bool,
+) -> Result<()> {
+    let mut transaction = pool.begin().await?;
+    let state = if suppress_new_fights {
+        "suppressed"
+    } else {
+        "pending"
+    };
+
+    for fight in fights {
+        sqlx::query(
+            r#"
+            INSERT INTO warcraft_logs_fights (
+                subscription_id, report_code, fight_id, boss_name, difficulty,
+                raid_size, average_item_level, start_time_ms, end_time_ms,
+                announcement_state
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (subscription_id, report_code, fight_id) DO UPDATE
+            SET boss_name = EXCLUDED.boss_name,
+                difficulty = EXCLUDED.difficulty,
+                raid_size = EXCLUDED.raid_size,
+                average_item_level = EXCLUDED.average_item_level,
+                start_time_ms = EXCLUDED.start_time_ms,
+                end_time_ms = EXCLUDED.end_time_ms,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(subscription_id)
+        .bind(report_code)
+        .bind(fight.fight_id)
+        .bind(&fight.boss_name)
+        .bind(fight.difficulty)
+        .bind(fight.raid_size)
+        .bind(fight.average_item_level)
+        .bind(fight.start_time_ms)
+        .bind(fight.end_time_ms)
+        .bind(state)
+        .execute(&mut *transaction)
+        .await?;
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE warcraft_logs_reports
+        SET baseline_scanned = TRUE,
+            revision = GREATEST(revision, $3),
+            end_time_ms = COALESCE($4, end_time_ms),
+            last_inspected_at = NOW(),
+            last_error = NULL,
+            updated_at = NOW()
+        WHERE subscription_id = $1 AND code = $2
+        "#,
+    )
+    .bind(subscription_id)
+    .bind(report_code)
+    .bind(report_revision)
+    .bind(report_end_time_ms)
+    .execute(&mut *transaction)
+    .await?;
+
+    transaction.commit().await?;
+    Ok(())
+}
+
+pub async fn list_pending_wcl_fights(
+    pool: &PgPool,
+    subscription_id: i64,
+) -> Result<Vec<WclPendingFight>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT f.subscription_id, s.discord_channel_id, s.wcl_site, s.wcl_guild_name,
+               f.report_code, r.title AS report_title,
+               r.start_time_ms AS report_start_time_ms,
+               f.fight_id, f.boss_name, f.difficulty, f.raid_size,
+               f.average_item_level, f.start_time_ms, f.end_time_ms
+        FROM warcraft_logs_fights f
+        JOIN warcraft_logs_reports r
+          ON r.subscription_id = f.subscription_id AND r.code = f.report_code
+        JOIN warcraft_logs_subscriptions s ON s.id = f.subscription_id
+        WHERE f.subscription_id = $1
+          AND f.announcement_state = 'pending'
+        ORDER BY r.start_time_ms, f.fight_id
+        "#,
+    )
+    .bind(subscription_id)
+    .fetch_all(pool)
+    .await?;
+
+    rows.iter()
+        .map(|row| {
+            Ok(WclPendingFight {
+                subscription_id: row.get("subscription_id"),
+                discord_channel_id: row.get("discord_channel_id"),
+                wcl_site: WarcraftLogsSite::from_slug(row.get("wcl_site"))?,
+                wcl_guild_name: row.get("wcl_guild_name"),
+                report_code: row.get("report_code"),
+                report_title: row.get("report_title"),
+                report_start_time_ms: row.get("report_start_time_ms"),
+                fight: WclFightRecord {
+                    fight_id: row.get("fight_id"),
+                    boss_name: row.get("boss_name"),
+                    difficulty: row.get("difficulty"),
+                    raid_size: row.get("raid_size"),
+                    average_item_level: row.get("average_item_level"),
+                    start_time_ms: row.get("start_time_ms"),
+                    end_time_ms: row.get("end_time_ms"),
+                },
+            })
+        })
+        .collect()
+}
+
+pub async fn mark_wcl_fight_posted(
+    pool: &PgPool,
+    subscription_id: i64,
+    report_code: &str,
+    fight_id: i32,
+    message_id: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE warcraft_logs_fights
+        SET announcement_state = 'posted', discord_message_id = $4,
+            last_error = NULL, updated_at = NOW()
+        WHERE subscription_id = $1 AND report_code = $2 AND fight_id = $3
+        "#,
+    )
+    .bind(subscription_id)
+    .bind(report_code)
+    .bind(fight_id)
+    .bind(message_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn set_wcl_fight_error(
+    pool: &PgPool,
+    subscription_id: i64,
+    report_code: &str,
+    fight_id: i32,
+    error: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE warcraft_logs_fights
+        SET last_error = $4, updated_at = NOW()
+        WHERE subscription_id = $1 AND report_code = $2 AND fight_id = $3
+        "#,
+    )
+    .bind(subscription_id)
+    .bind(report_code)
+    .bind(fight_id)
+    .bind(error)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn set_wcl_subscription_error(
+    pool: &PgPool,
+    subscription_id: i64,
+    error: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE warcraft_logs_subscriptions
+        SET last_error = $2, last_polled_at = NOW(), updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(subscription_id)
+    .bind(error)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn clear_wcl_subscription_error(pool: &PgPool, subscription_id: i64) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE warcraft_logs_subscriptions
+        SET last_error = NULL, last_polled_at = NOW(), updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(subscription_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // ISS telemetry history
 // ---------------------------------------------------------------------------
 
@@ -340,4 +977,195 @@ pub async fn get_iss_telemetry_history(
             processor_status: r.get("processor_status"),
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        NewWclSubscription, WclFightRecord, WclReportRecord, get_wcl_subscription,
+        list_pending_wcl_fights, list_wcl_reports_to_announce, list_wcl_reports_to_inspect,
+        mark_wcl_fight_posted, mark_wcl_report_posted, reconcile_wcl_reports,
+        remove_wcl_subscription, replace_wcl_subscription,
+    };
+    use crate::warcraft_logs::WarcraftLogsSite;
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL pointing to PostgreSQL"]
+    async fn persists_baselines_and_deduplicates_report_and_fight_work() {
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set");
+        let pool = PgPool::connect(&database_url).await.unwrap();
+        sqlx::raw_sql(include_str!("../migrations/004_warcraft_logs.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let discord_guild_id = format!("test-{}", Uuid::new_v4());
+        let baseline_report = WclReportRecord {
+            code: "baseline-report".to_owned(),
+            title: "Baseline".to_owned(),
+            start_time_ms: 1_000,
+            end_time_ms: None,
+            revision: 0,
+            zone_name: Some("Test Zone".to_owned()),
+            visibility: "public".to_owned(),
+        };
+        let baseline_fight = WclFightRecord {
+            fight_id: 1,
+            boss_name: "Old Boss".to_owned(),
+            difficulty: Some(5),
+            raid_size: Some(20),
+            average_item_level: Some(700.0),
+            start_time_ms: 10_000,
+            end_time_ms: 70_000,
+        };
+        let subscription_id = replace_wcl_subscription(
+            &pool,
+            NewWclSubscription {
+                discord_guild_id: &discord_guild_id,
+                discord_channel_id: "123",
+                wcl_guild_id: 42,
+                wcl_site: WarcraftLogsSite::Classic,
+                wcl_guild_name: "Test Guild",
+                server_slug: "test-realm",
+                server_name: "Test Realm",
+                region: "US",
+                baseline_time_ms: 100_000,
+            },
+            std::slice::from_ref(&baseline_report),
+            &[("baseline-report".to_owned(), vec![baseline_fight])],
+        )
+        .await
+        .unwrap();
+
+        let subscription = get_wcl_subscription(&pool, &discord_guild_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(subscription.wcl_site, WarcraftLogsSite::Classic);
+        assert!(
+            list_wcl_reports_to_announce(&pool, subscription_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            list_pending_wcl_fights(&pool, subscription_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let new_report = WclReportRecord {
+            code: "new-report".to_owned(),
+            title: "New Report".to_owned(),
+            start_time_ms: 200_000,
+            end_time_ms: Some(300_000),
+            revision: 1,
+            zone_name: Some("Test Zone".to_owned()),
+            visibility: "public".to_owned(),
+        };
+        reconcile_wcl_reports(
+            &pool,
+            subscription_id,
+            std::slice::from_ref(&new_report),
+            400_000,
+        )
+        .await
+        .unwrap();
+        reconcile_wcl_reports(
+            &pool,
+            subscription_id,
+            std::slice::from_ref(&new_report),
+            400_000,
+        )
+        .await
+        .unwrap();
+
+        let reports = list_wcl_reports_to_announce(&pool, subscription_id)
+            .await
+            .unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].code, "new-report");
+        mark_wcl_report_posted(&pool, subscription_id, "new-report", "456")
+            .await
+            .unwrap();
+
+        let inspections = list_wcl_reports_to_inspect(&pool, subscription_id)
+            .await
+            .unwrap();
+        let new_inspection = inspections
+            .iter()
+            .find(|report| report.code == "new-report")
+            .unwrap();
+        assert!(!new_inspection.baseline_scanned);
+        assert!(!new_inspection.suppress_initial_kills);
+        let baseline_inspection = inspections
+            .iter()
+            .find(|report| report.code == "baseline-report")
+            .unwrap();
+        assert!(baseline_inspection.baseline_scanned);
+        assert!(baseline_inspection.suppress_initial_kills);
+
+        let new_fight = WclFightRecord {
+            fight_id: 2,
+            boss_name: "New Boss".to_owned(),
+            difficulty: Some(4),
+            raid_size: Some(20),
+            average_item_level: Some(701.0),
+            start_time_ms: 20_000,
+            end_time_ms: 80_000,
+        };
+        super::record_wcl_fights(
+            &pool,
+            subscription_id,
+            "new-report",
+            1,
+            Some(300_000),
+            std::slice::from_ref(&new_fight),
+            false,
+        )
+        .await
+        .unwrap();
+        super::record_wcl_fights(
+            &pool,
+            subscription_id,
+            "new-report",
+            1,
+            Some(300_000),
+            std::slice::from_ref(&new_fight),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let fights = list_pending_wcl_fights(&pool, subscription_id)
+            .await
+            .unwrap();
+        assert_eq!(fights.len(), 1);
+        assert_eq!(fights[0].fight.boss_name, "New Boss");
+        mark_wcl_fight_posted(&pool, subscription_id, "new-report", 2, "789")
+            .await
+            .unwrap();
+        assert!(
+            list_pending_wcl_fights(&pool, subscription_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        assert!(
+            remove_wcl_subscription(&pool, &discord_guild_id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            get_wcl_subscription(&pool, &discord_guild_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 }

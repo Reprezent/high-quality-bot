@@ -7,17 +7,22 @@ mod parsing;
 mod sim_request_codec;
 mod sim_runtime;
 mod sim_runtime_targets;
+mod warcraft_logs;
+mod warcraft_logs_discord;
+mod warcraft_logs_tracker;
 
 use anyhow::Result;
 use poise::serenity_prelude as serenity;
 use sqlx::PgPool;
 use sqlx::postgres::PgConnectOptions;
+use warcraft_logs::WarcraftLogsClient;
 
 /// Shared application state available to every command handler.
 #[derive(Debug)]
 pub struct Data {
     pub db: PgPool,
     pub sim_api_base_url: String,
+    pub wcl_client: Option<WarcraftLogsClient>,
 }
 
 /// Poise command context alias.
@@ -83,6 +88,21 @@ async fn main() -> Result<()> {
     let pool = db::create_pool(postgres_connect_options()).await?;
     let sim_api_base_url = std::env::var("WOWSIMS_API_BASE_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:3333".to_string());
+    let wcl_config = match warcraft_logs::WarcraftLogsConfig::from_env() {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::error!(
+                error = ?error,
+                "Warcraft Logs configuration is invalid; tracking will be disabled"
+            );
+            None
+        }
+    };
+    let wcl_client = wcl_config
+        .as_ref()
+        .map(WarcraftLogsClient::new)
+        .transpose()?;
+    let wcl_poll_interval = wcl_config.as_ref().map(|config| config.poll_interval);
 
     iss_telemetry_tracker::spawn(pool.clone());
 
@@ -95,6 +115,7 @@ async fn main() -> Result<()> {
                 commands::version::version(),
                 commands::piss::piss(),
                 commands::pisstory::pisstory(),
+                commands::warcraftlogs::warcraftlogs(),
             ],
             pre_command: |ctx| {
                 Box::pin(async move {
@@ -130,7 +151,9 @@ async fn main() -> Result<()> {
             },
             ..Default::default()
         })
-        .setup(|ctx, _ready, framework| {
+        .setup(move |ctx, _ready, framework| {
+            let wcl_client = wcl_client.clone();
+            let wcl_poll_interval = wcl_poll_interval;
             Box::pin(async move {
                 let registered_commands = command_names(&framework.options().commands);
 
@@ -156,10 +179,26 @@ async fn main() -> Result<()> {
                     );
                 }
 
+                if let (Some(client), Some(poll_interval)) =
+                    (wcl_client.clone(), wcl_poll_interval)
+                {
+                    warcraft_logs_tracker::spawn(
+                        pool.clone(),
+                        client,
+                        ctx.http.clone(),
+                        poll_interval,
+                    );
+                } else {
+                    tracing::warn!(
+                        "Warcraft Logs tracking is disabled because API credentials are not configured"
+                    );
+                }
+
                 tracing::info!("Bot is ready!");
                 Ok(Data {
                     db: pool,
                     sim_api_base_url,
+                    wcl_client,
                 })
             })
         })
