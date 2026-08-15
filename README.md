@@ -6,7 +6,7 @@ A Discord bot written in Rust that runs World of Warcraft simulations via slash 
 
 | Command | Description |
 |---------|-------------|
-| `/sim <gear_json>` | Queue a WoW simulation from a WoWSims JSON payload (must include player class/spec). Returns a run ID. |
+| `/sim [export_json] [export_file]` | Queue a simulation from a complete WoWSims individual-character UI JSON export. Use one input source only; a `.json` attachment is recommended. |
 | `/class <class>[:<spec>]` | Save your default class (and optionally spec) to the database. |
 | `/status <run-id>` | Check the current status of a simulation run by its UUID. |
 | `/health` | Check if the bot can reach PostgreSQL and the wowsims async API. |
@@ -16,7 +16,6 @@ A Discord bot written in Rust that runs World of Warcraft simulations via slash 
 ### Examples
 
 ```
-/sim {"player":{"class":"ClassWarrior","armsWarrior":{},"equipment":{"items":[{"id":123}]}}}
 /class warrior:arms
 /class paladin
 /status 550e8400-e29b-41d4-a716-446655440000
@@ -24,6 +23,32 @@ A Discord bot written in Rust that runs World of Warcraft simulations via slash 
 /dailies
 /piss
 ```
+
+### Running a WoWSims individual UI export
+
+`/sim` accepts the canonical JSON exported by a WoWSims **individual-character**
+page. In the web UI, use the JSON export action and select every simulation
+category, then upload the resulting `.json` file as the `export_file` option to
+`/sim`. Pasting it into `export_json` is available for small exports, but custom
+APLs commonly exceed Discord's slash-command text limit.
+
+The bot validates the exported `IndividualSimSettings` schema and submits the
+same simulation-relevant configuration as the individual UI:
+
+- Full player configuration: race, gear, gems, enchants, reforges, talents,
+  glyphs, professions, consumes, cooldowns, spec options, individual buffs, and
+  APL rotation.
+- Raid/party buffs, debuffs, target dummies, and tank assignment.
+- Encounter duration, execute thresholds, targets, and health mode.
+- Iterations and fixed RNG seed.
+
+When the UI export has no fixed seed, the bot generates one, reports it in the
+acknowledgement, and stores it with the run. Reuse that seed in the UI export to
+make a browser/server comparison reproducible.
+
+Full raid-page exports are intentionally not accepted yet. The current command
+matches the individual-character UI and creates its equivalent one-player raid
+request.
 
 ## Prerequisites
 
@@ -79,7 +104,7 @@ This starts:
 | `POSTGRES_PORT` | — | `5432` | DB port used by bot |
 | `WOWSIMS_API_BASE_URL` | — | `http://127.0.0.1:3333` (local) / `http://sim:3333` (docker-compose) | Base URL for wowsims async sim API (`/raidSimAsync`, `/asyncProgress`) |
 | `LOG_SIM_REQUEST_JSON` | — | `false` | When true (`1/true/yes/on`), logs outgoing raid sim request as pretty JSON before calling backend |
-| `WOWSIMS_SIM_DEBUG` | — | `false` | When true (`1/true/yes/on`), sends `simOptions.debug=true` to backend sim |
+| `WOWSIMS_SIM_DEBUG` | — | `false` | Diagnostic override: when true (`1/true/yes/on`), sends `simOptions.debug=true` to backend sim. Leave off for UI-equivalent runs. |
 | `RUST_LOG` | — | `info` | Log level |
 
 If `DISCORD_GUILD_ID` is set, Discord command updates are usually visible almost immediately in that server. Leave it unset for production-style global registration.
@@ -131,6 +156,10 @@ MOP_PROTO_DIR=/absolute/path/to/mop/proto cargo check --features mop-proto
 git submodule update --remote --merge vendor/wowsims-mop
 git add vendor/wowsims-mop .gitmodules
 ```
+
+When advancing the submodule, also update `MOP_UPSTREAM_REVISION` in
+[`build.rs`](build.rs) to the new submodule commit so persisted runs retain the
+schema revision that decoded their export.
 
 ### Running the local async sim API
 

@@ -1,21 +1,22 @@
 use anyhow::{Context, Result, anyhow};
 use prost::Message;
-use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
 use serde_json::Value;
 use sqlx::PgPool;
 use std::collections::HashSet;
-use std::sync::OnceLock;
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
 use crate::db;
 use crate::mop_proto::mop::{
-    AplRotation, AsyncApiResult, Debuffs, PartyBuffs, ProgressMetrics, Raid, RaidBuffs,
-    RaidSimRequest, SimType, player,
+    AsyncApiResult, Debuffs, PartyBuffs, ProgressMetrics, Raid, RaidBuffs, RaidSimRequest, SimType,
 };
 use crate::parsing::build_player_from_run;
 use crate::sim_runtime_targets::{
     default_mop_encounter, default_mop_raid, default_mop_sim_options,
+};
+use crate::ui_import::{
+    INPUT_FORMAT_INDIVIDUAL_UI_EXPORT, parse_normalized_raid_sim_request, parse_protojson_message,
+    protojson_message_to_value,
 };
 
 fn raid_player_count(raid: &Raid) -> usize {
@@ -86,96 +87,6 @@ fn extract_raid_members(progress: &ProgressMetrics) -> Vec<String> {
     raid_members
 }
 
-fn player_spec_label(spec: &Option<player::Spec>) -> &'static str {
-    match spec {
-        Some(player::Spec::BloodDeathKnight(_)) => "bloodDeathKnight",
-        Some(player::Spec::FrostDeathKnight(_)) => "frostDeathKnight",
-        Some(player::Spec::UnholyDeathKnight(_)) => "unholyDeathKnight",
-        Some(player::Spec::BalanceDruid(_)) => "balanceDruid",
-        Some(player::Spec::FeralDruid(_)) => "feralDruid",
-        Some(player::Spec::GuardianDruid(_)) => "guardianDruid",
-        Some(player::Spec::RestorationDruid(_)) => "restorationDruid",
-        Some(player::Spec::BeastMasteryHunter(_)) => "beastMasteryHunter",
-        Some(player::Spec::MarksmanshipHunter(_)) => "marksmanshipHunter",
-        Some(player::Spec::SurvivalHunter(_)) => "survivalHunter",
-        Some(player::Spec::ArcaneMage(_)) => "arcaneMage",
-        Some(player::Spec::FireMage(_)) => "fireMage",
-        Some(player::Spec::FrostMage(_)) => "frostMage",
-        Some(player::Spec::BrewmasterMonk(_)) => "brewmasterMonk",
-        Some(player::Spec::MistweaverMonk(_)) => "mistweaverMonk",
-        Some(player::Spec::WindwalkerMonk(_)) => "windwalkerMonk",
-        Some(player::Spec::HolyPaladin(_)) => "holyPaladin",
-        Some(player::Spec::ProtectionPaladin(_)) => "protectionPaladin",
-        Some(player::Spec::RetributionPaladin(_)) => "retributionPaladin",
-        Some(player::Spec::DisciplinePriest(_)) => "disciplinePriest",
-        Some(player::Spec::HolyPriest(_)) => "holyPriest",
-        Some(player::Spec::ShadowPriest(_)) => "shadowPriest",
-        Some(player::Spec::AssassinationRogue(_)) => "assassinationRogue",
-        Some(player::Spec::CombatRogue(_)) => "combatRogue",
-        Some(player::Spec::SubtletyRogue(_)) => "subtletyRogue",
-        Some(player::Spec::ElementalShaman(_)) => "elementalShaman",
-        Some(player::Spec::EnhancementShaman(_)) => "enhancementShaman",
-        Some(player::Spec::RestorationShaman(_)) => "restorationShaman",
-        Some(player::Spec::AfflictionWarlock(_)) => "afflictionWarlock",
-        Some(player::Spec::DemonologyWarlock(_)) => "demonologyWarlock",
-        Some(player::Spec::DestructionWarlock(_)) => "destructionWarlock",
-        Some(player::Spec::ArmsWarrior(_)) => "armsWarrior",
-        Some(player::Spec::FuryWarrior(_)) => "furyWarrior",
-        Some(player::Spec::ProtectionWarrior(_)) => "protectionWarrior",
-        None => "unknown",
-    }
-}
-
-fn proto_descriptor_pool() -> Result<&'static DescriptorPool> {
-    static DESCRIPTOR_POOL: OnceLock<Result<DescriptorPool, String>> = OnceLock::new();
-
-    let pool = DESCRIPTOR_POOL.get_or_init(|| {
-        DescriptorPool::decode(crate::mop_proto::mop::DESCRIPTOR_SET_BYTES)
-            .map_err(|error| format!("failed to decode protobuf descriptor set: {error}"))
-    });
-
-    match pool {
-        Ok(pool) => Ok(pool),
-        Err(error) => Err(anyhow!(error.clone())),
-    }
-}
-
-fn apl_rotation_descriptor() -> Result<&'static MessageDescriptor> {
-    static APL_ROTATION_DESCRIPTOR: OnceLock<Result<MessageDescriptor, String>> = OnceLock::new();
-
-    let descriptor = APL_ROTATION_DESCRIPTOR.get_or_init(|| {
-        let pool = proto_descriptor_pool().map_err(|error| format!("{error:#}"))?;
-
-        pool.get_message_by_name("proto.APLRotation")
-            .ok_or_else(|| "APLRotation descriptor not found in descriptor set".to_string())
-    });
-
-    match descriptor {
-        Ok(descriptor) => Ok(descriptor),
-        Err(error) => Err(anyhow!(error.clone())),
-    }
-}
-
-fn parse_protojson_message<T>(message_name: &str, value: &Value) -> Result<T>
-where
-    T: Message + Default,
-{
-    let pool = proto_descriptor_pool()?;
-    let descriptor = pool
-        .get_message_by_name(message_name)
-        .ok_or_else(|| anyhow!("{message_name} descriptor not found in descriptor set"))?;
-
-    let payload = serde_json::to_string(value)
-        .with_context(|| format!("failed to serialize {message_name} payload as JSON"))?;
-    let mut deserializer = serde_json::Deserializer::from_str(&payload);
-    let dynamic = DynamicMessage::deserialize(descriptor, &mut deserializer)
-        .with_context(|| format!("failed to decode {message_name} protojson"))?;
-
-    dynamic
-        .transcode_to::<T>()
-        .with_context(|| format!("failed to transcode dynamic {message_name} message"))
-}
-
 fn extract_raid_buffs_payload(payload: &Value) -> Option<&Value> {
     payload
         .get("raidBuffs")
@@ -224,160 +135,21 @@ fn extract_party_buffs_payload(payload: &Value) -> Option<&Value> {
         })
 }
 
-fn apl_rotation_to_json(rotation: &AplRotation) -> Value {
-    let descriptor = match apl_rotation_descriptor() {
-        Ok(descriptor) => descriptor,
-        Err(error) => {
-            return serde_json::json!({
-                "serializationError": format!("{error:#}"),
-            });
-        }
-    };
-
-    let bytes = rotation.encode_to_vec();
-    match DynamicMessage::decode(descriptor.clone(), &mut bytes.as_slice()) {
-        Ok(dynamic) => serde_json::to_value(dynamic).unwrap_or_else(|error| {
-            serde_json::json!({
-                "serializationError": format!("failed to serialize APL dynamic message to json: {error}"),
-            })
-        }),
-        Err(error) => serde_json::json!({
-            "serializationError": format!("failed to decode APL rotation bytes: {error}"),
-        }),
-    }
-}
-
-fn request_to_json(request: &RaidSimRequest) -> Value {
-    let raid = request.raid.as_ref();
-    let encounter = request.encounter.as_ref();
-    let sim_options = request.sim_options.as_ref();
-
-    let parties = raid
-        .map(|raid| {
-            raid.parties
-                .iter()
-                .enumerate()
-                .map(|(party_index, party)| {
-                    let players: Vec<Value> = party
-                        .players
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, player)| player.class != 0)
-                        .map(|(player_index, player)| {
-                            let equipment_items: Vec<Value> = player
-                                .equipment
-                                .as_ref()
-                                .map(|equipment| {
-                                    equipment
-                                        .items
-                                        .iter()
-                                        .map(|item| {
-                                            serde_json::json!({
-                                                "id": item.id,
-                                                "enchant": item.enchant,
-                                                "gems": item.gems,
-                                                "reforging": item.reforging,
-                                                "randomSuffix": item.random_suffix,
-                                                "upgradeStep": item.upgrade_step,
-                                                "challengeMode": item.challenge_mode,
-                                                "tinker": item.tinker,
-                                            })
-                                        })
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-
-                            serde_json::json!({
-                                "partyIndex": party_index,
-                                "playerIndex": player_index,
-                                "name": player.name,
-                                "class": player.class,
-                                "race": player.race,
-                                "talentsString": player.talents_string,
-                                "spec": player_spec_label(&player.spec),
-                                "rotationPresent": player.rotation.is_some(),
-                                "rotationApl": player.rotation.as_ref().map(apl_rotation_to_json),
-                                "equipment": {
-                                    "items": equipment_items,
-                                },
-                            })
-                        })
-                        .collect();
-
-                    serde_json::json!({
-                        "partyIndex": party_index,
-                        "players": players,
-                    })
-                })
-                .collect::<Vec<Value>>()
-        })
-        .unwrap_or_default();
-
-    let targets = encounter
-        .map(|encounter| {
-            encounter
-                .targets
-                .iter()
-                .map(|target| {
-                    serde_json::json!({
-                        "id": target.id,
-                        "name": target.name,
-                        "level": target.level,
-                        "mobType": target.mob_type,
-                        "stats": target.stats,
-                        "minBaseDamage": target.min_base_damage,
-                        "damageSpread": target.damage_spread,
-                        "swingSpeed": target.swing_speed,
-                        "tankIndex": target.tank_index,
-                    })
-                })
-                .collect::<Vec<Value>>()
-        })
-        .unwrap_or_default();
-
-    serde_json::json!({
-        "requestId": request.request_id,
-        "type": request.r#type,
-        "raid": {
-            "numActiveParties": raid.map(|r| r.num_active_parties).unwrap_or_default(),
-            "parties": parties,
-        },
-        "encounter": {
-            "apiVersion": encounter.map(|e| e.api_version).unwrap_or_default(),
-            "duration": encounter.map(|e| e.duration).unwrap_or_default(),
-            "durationVariation": encounter.map(|e| e.duration_variation).unwrap_or_default(),
-            "executeProportion20": encounter.map(|e| e.execute_proportion_20).unwrap_or_default(),
-            "executeProportion25": encounter.map(|e| e.execute_proportion_25).unwrap_or_default(),
-            "executeProportion35": encounter.map(|e| e.execute_proportion_35).unwrap_or_default(),
-            "executeProportion45": encounter.map(|e| e.execute_proportion_45).unwrap_or_default(),
-            "executeProportion90": encounter.map(|e| e.execute_proportion_90).unwrap_or_default(),
-            "useHealth": encounter.map(|e| e.use_health).unwrap_or_default(),
-            "targets": targets,
-        },
-        "simOptions": {
-            "iterations": sim_options.map(|s| s.iterations).unwrap_or_default(),
-            "randomSeed": sim_options.map(|s| s.random_seed).unwrap_or_default(),
-            "debug": sim_options.map(|s| s.debug).unwrap_or_default(),
-            "debugFirstIteration": sim_options.map(|s| s.debug_first_iteration).unwrap_or_default(),
-            "interactive": sim_options.map(|s| s.interactive).unwrap_or_default(),
-            "useLabeledRands": sim_options.map(|s| s.use_labeled_rands).unwrap_or_default(),
-        }
-    })
-}
-
 fn maybe_log_request_json(run_id: Uuid, request: &RaidSimRequest) {
     let enabled = std::env::var("LOG_SIM_REQUEST_JSON")
         .map(|value| {
             let normalized = value.trim().to_ascii_lowercase();
             normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on"
         })
-        .unwrap_or(true);
+        .unwrap_or(false);
 
     if !enabled {
         return;
     }
 
-    match serde_json::to_string_pretty(&request_to_json(request)) {
+    match protojson_message_to_value("proto.RaidSimRequest", request)
+        .and_then(|value| serde_json::to_string_pretty(&value).map_err(Into::into))
+    {
         Ok(json) => {
             tracing::info!(run_id = %run_id, request_json = %json, "sending raid sim request")
         }
@@ -387,21 +159,8 @@ fn maybe_log_request_json(run_id: Uuid, request: &RaidSimRequest) {
     }
 }
 
-pub async fn run_async_simulation(
-    pool: PgPool,
-    sim_api_base_url: String,
-    run_id: Uuid,
-) -> Result<()> {
-    db::update_simulation_run_status(&pool, run_id, "running").await?;
-
-    let client = reqwest::Client::new();
-    let request_id = run_id.to_string();
-
-    let run = db::get_simulation_run(&pool, run_id)
-        .await?
-        .ok_or_else(|| anyhow!("simulation run not found: {}", run_id))?;
-
-    let mapped_player = build_player_from_run(&run)?;
+fn build_legacy_request(run: &db::SimulationRun, run_id: Uuid) -> Result<RaidSimRequest> {
+    let mapped_player = build_player_from_run(run)?;
     let mut raid = default_mop_raid();
 
     if let Some(raid_buffs_payload) = extract_raid_buffs_payload(&run.gear_payload) {
@@ -413,7 +172,7 @@ pub async fn run_async_simulation(
                 tracing::warn!(
                     run_id = %run_id,
                     error = ?error,
-                    "failed to parse raidBuffs from payload; using default raid buffs"
+                    "failed to parse legacy raidBuffs from payload; using default raid buffs"
                 );
             }
         }
@@ -428,7 +187,7 @@ pub async fn run_async_simulation(
                 tracing::warn!(
                     run_id = %run_id,
                     error = ?error,
-                    "failed to parse debuffs from payload; using default debuffs"
+                    "failed to parse legacy debuffs from payload; using default debuffs"
                 );
             }
         }
@@ -445,7 +204,7 @@ pub async fn run_async_simulation(
                 tracing::warn!(
                     run_id = %run_id,
                     error = ?error,
-                    "failed to parse partyBuffs from payload; using default party buffs"
+                    "failed to parse legacy partyBuffs from payload; using default party buffs"
                 );
             }
         }
@@ -453,14 +212,41 @@ pub async fn run_async_simulation(
 
     raid.parties[0].players[0] = mapped_player;
 
-    let request = RaidSimRequest {
-        request_id: request_id.clone(),
+    Ok(RaidSimRequest {
+        request_id: run_id.to_string(),
         raid: Some(raid),
         encounter: Some(default_mop_encounter()),
         sim_options: Some(default_mop_sim_options(run_id)),
         r#type: SimType::Raid as i32,
-        ..Default::default()
+    })
+}
+
+pub async fn run_async_simulation(
+    pool: PgPool,
+    sim_api_base_url: String,
+    run_id: Uuid,
+) -> Result<()> {
+    db::update_simulation_run_status(&pool, run_id, "running").await?;
+
+    let client = reqwest::Client::new();
+    let request_id = run_id.to_string();
+
+    let run = db::get_simulation_run(&pool, run_id)
+        .await?
+        .ok_or_else(|| anyhow!("simulation run not found: {}", run_id))?;
+
+    let mut request = match run.normalized_request.as_ref() {
+        Some(payload) => parse_normalized_raid_sim_request(payload).with_context(|| {
+            format!("failed to load normalized simulation request for run {run_id}")
+        })?,
+        None if run.input_format == INPUT_FORMAT_INDIVIDUAL_UI_EXPORT => {
+            return Err(anyhow!(
+                "individual UI export run {run_id} is missing its normalized request"
+            ));
+        }
+        None => build_legacy_request(&run, run_id)?,
     };
+    request.request_id = request_id.clone();
 
     if let Err(error) = validate_sim_request_payload(&request) {
         db::update_simulation_run_status(&pool, run_id, "failed").await?;
@@ -685,5 +471,98 @@ pub async fn run_async_simulation(
         }
 
         sleep(Duration::from_secs(1)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui_import::ImportedIndividualSim;
+
+    #[tokio::test]
+    #[ignore = "requires a running WoWSims async API at WOWSIMS_API_BASE_URL"]
+    async fn submits_a_normalized_individual_ui_request_to_the_async_api() {
+        let base_url = std::env::var("WOWSIMS_API_BASE_URL")
+            .expect("WOWSIMS_API_BASE_URL must point at a running simulator");
+        let mut payload: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/individual-ui-export.json"))
+                .expect("fixture must be valid JSON");
+        payload["settings"]["iterations"] = serde_json::json!(1);
+        let request = ImportedIndividualSim::from_json(&payload)
+            .expect("fixture must import")
+            .normalize(Uuid::new_v4())
+            .expect("fixture must normalize")
+            .request;
+        let client = reqwest::Client::new();
+
+        let response = client
+            .post(format!(
+                "{base_url}/raidSimAsync?requestId={}",
+                request.request_id
+            ))
+            .header("content-type", "application/x-protobuf")
+            .body(request.encode_to_vec())
+            .send()
+            .await
+            .expect("async API request must complete");
+        assert!(
+            response.status().is_success(),
+            "raidSimAsync returned {}",
+            response.status()
+        );
+        let async_result = AsyncApiResult::decode(
+            response
+                .bytes()
+                .await
+                .expect("async API response body must be readable")
+                .as_ref(),
+        )
+        .expect("async API response must be protobuf");
+
+        for _ in 0..120 {
+            let response = client
+                .post(format!("{base_url}/asyncProgress"))
+                .header("content-type", "application/x-protobuf")
+                .body(async_result.encode_to_vec())
+                .send()
+                .await
+                .expect("async progress request must complete");
+
+            if response.status().as_u16() == 204 {
+                sleep(Duration::from_millis(250)).await;
+                continue;
+            }
+
+            assert!(
+                response.status().is_success(),
+                "asyncProgress returned {}",
+                response.status()
+            );
+            let progress = ProgressMetrics::decode(
+                response
+                    .bytes()
+                    .await
+                    .expect("async progress body must be readable")
+                    .as_ref(),
+            )
+            .expect("async progress body must be protobuf");
+
+            if let Some(result) = progress.final_raid_result {
+                let error_message = result
+                    .error
+                    .as_ref()
+                    .map(|error| error.message.as_str())
+                    .unwrap_or("no simulator error");
+                assert!(
+                    result.error.is_none(),
+                    "simulator rejected normalized request: {error_message}"
+                );
+                return;
+            }
+
+            sleep(Duration::from_millis(250)).await;
+        }
+
+        panic!("simulator did not return final metrics within 30 seconds");
     }
 }

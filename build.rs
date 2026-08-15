@@ -3,11 +3,14 @@ use std::path::PathBuf;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+const MOP_UPSTREAM_REVISION: &str = "325d83c7bb0b2890795bdd21146d60988bb8869c";
+
 fn main() {
     let build_timestamp = OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .expect("failed to format build timestamp");
     println!("cargo:rustc-env=BUILD_TIMESTAMP_UTC={build_timestamp}");
+    println!("cargo:rustc-env=MOP_UPSTREAM_REVISION={MOP_UPSTREAM_REVISION}");
 
     println!("cargo:rerun-if-env-changed=MOP_PROTO_DIR");
 
@@ -36,8 +39,11 @@ fn main() {
     });
 
     let api_proto = proto_dir.join("api.proto");
-    if !api_proto.exists() {
-        panic!("api.proto not found in {}", proto_dir.display());
+    let ui_proto = proto_dir.join("ui.proto");
+    for proto in [&api_proto, &ui_proto] {
+        if !proto.exists() {
+            panic!("{} not found in {}", proto.display(), proto_dir.display());
+        }
     }
 
     let mut includes = vec![proto_dir.clone()];
@@ -53,6 +59,6 @@ fn main() {
     let mut config = prost_build::Config::new();
     config.file_descriptor_set_path(out_dir.join("mop_descriptor.bin"));
     config
-        .compile_protos(&[api_proto], &includes)
+        .compile_protos(&[api_proto, ui_proto], &includes)
         .expect("failed to compile wowsims/mop protobuf files");
 }

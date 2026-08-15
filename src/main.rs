@@ -6,6 +6,7 @@ pub mod mop_proto;
 mod parsing;
 mod sim_runtime;
 mod sim_runtime_targets;
+mod ui_import;
 
 use anyhow::Result;
 use poise::serenity_prelude as serenity;

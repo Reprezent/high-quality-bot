@@ -21,6 +21,10 @@ pub async fn create_pool(connect_options: PgConnectOptions) -> Result<PgPool> {
         .execute(&pool)
         .await?;
 
+    sqlx::raw_sql(include_str!("../migrations/003_sim_request_audit.sql"))
+        .execute(&pool)
+        .await?;
+
     Ok(pool)
 }
 
@@ -35,37 +39,64 @@ pub struct SimulationRun {
     pub class: String,
     pub spec: String,
     pub gear_payload: serde_json::Value,
+    pub input_format: String,
+    pub upstream_revision: Option<String>,
+    pub normalized_request: Option<serde_json::Value>,
+    pub effective_random_seed: Option<i64>,
+    pub effective_iterations: Option<i32>,
     pub raid_members: Vec<String>,
     pub status: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-/// Create a new simulation run record and return its ID.
-pub async fn create_simulation_run(
-    pool: &PgPool,
-    discord_user_id: &str,
-    class: &str,
-    spec: &str,
-    gear_payload: &serde_json::Value,
-) -> Result<Uuid> {
-    let run_id = Uuid::new_v4();
+pub struct NewSimulationRun<'a> {
+    pub run_id: Uuid,
+    pub discord_user_id: &'a str,
+    pub class: &'a str,
+    pub spec: &'a str,
+    pub source_payload: &'a serde_json::Value,
+    pub input_format: &'a str,
+    pub upstream_revision: Option<&'a str>,
+    pub normalized_request: Option<&'a serde_json::Value>,
+    pub effective_random_seed: Option<i64>,
+    pub effective_iterations: Option<i32>,
+}
 
+/// Create a new simulation run record and return its server-owned ID.
+pub async fn create_simulation_run(pool: &PgPool, run: &NewSimulationRun<'_>) -> Result<Uuid> {
     sqlx::query(
         r#"
-        INSERT INTO simulation_runs (run_id, discord_user_id, class, spec, gear_payload, status)
-        VALUES ($1, $2, $3, $4, $5, 'queued')
+        INSERT INTO simulation_runs (
+            run_id,
+            discord_user_id,
+            class,
+            spec,
+            gear_payload,
+            input_format,
+            upstream_revision,
+            normalized_request,
+            effective_random_seed,
+            effective_iterations,
+            status
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'queued')
         "#,
     )
-    .bind(run_id)
-    .bind(discord_user_id)
-    .bind(class)
-    .bind(spec)
-    .bind(gear_payload)
+    .bind(run.run_id)
+    .bind(run.discord_user_id)
+    .bind(run.class)
+    .bind(run.spec)
+    .bind(run.source_payload)
+    .bind(run.input_format)
+    .bind(run.upstream_revision)
+    .bind(run.normalized_request)
+    .bind(run.effective_random_seed)
+    .bind(run.effective_iterations)
     .execute(pool)
     .await?;
 
-    Ok(run_id)
+    Ok(run.run_id)
 }
 
 /// Retrieve a simulation run by its ID.
@@ -73,7 +104,8 @@ pub async fn get_simulation_run(pool: &PgPool, run_id: Uuid) -> Result<Option<Si
     let row = sqlx::query(
         r#"
         SELECT run_id, discord_user_id, class, spec,
-             gear_payload, raid_members, status, created_at, updated_at
+             gear_payload, input_format, upstream_revision, normalized_request,
+             effective_random_seed, effective_iterations, raid_members, status, created_at, updated_at
         FROM simulation_runs
         WHERE run_id = $1
         "#,
@@ -88,6 +120,11 @@ pub async fn get_simulation_run(pool: &PgPool, run_id: Uuid) -> Result<Option<Si
         class: r.get("class"),
         spec: r.get("spec"),
         gear_payload: r.get("gear_payload"),
+        input_format: r.get("input_format"),
+        upstream_revision: r.get("upstream_revision"),
+        normalized_request: r.get("normalized_request"),
+        effective_random_seed: r.get("effective_random_seed"),
+        effective_iterations: r.get("effective_iterations"),
         raid_members: r.get("raid_members"),
         status: r.get("status"),
         created_at: r.get("created_at"),
