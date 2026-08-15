@@ -33,8 +33,8 @@ query GuildLookup($name: String!, $serverSlug: String!, $serverRegion: String!) 
 const GUILD_REPORTS_QUERY: &str = r#"
 query GuildReports(
   $guildID: Int!,
-  $startTime: Float!,
-  $endTime: Float!,
+  $startTime: Float,
+  $endTime: Float,
   $page: Int!,
   $limit: Int!
 ) {
@@ -239,8 +239,8 @@ impl WarcraftLogsClient {
                     GUILD_REPORTS_QUERY,
                     GuildReportsVariables {
                         guild_id,
-                        start_time: start_time_ms as f64,
-                        end_time: end_time_ms as f64,
+                        start_time: Some(start_time_ms as f64),
+                        end_time: Some(end_time_ms as f64),
                         page,
                         limit: REPORT_PAGE_LIMIT,
                     },
@@ -261,6 +261,29 @@ impl WarcraftLogsClient {
         Ok(ReportDiscovery {
             reports,
             rate_limit,
+        })
+    }
+
+    pub async fn recent_reports(&self, guild_id: i64, limit: i32) -> Result<ReportDiscovery> {
+        let data: GuildReportsData = self
+            .graphql(
+                GUILD_REPORTS_QUERY,
+                GuildReportsVariables {
+                    guild_id,
+                    start_time: None,
+                    end_time: None,
+                    page: 1,
+                    limit: limit.clamp(1, REPORT_PAGE_LIMIT),
+                },
+            )
+            .await?;
+        let mut reports = data.report_data.reports.data;
+        reports.sort_by(|left, right| right.start_time.total_cmp(&left.start_time));
+        reports.truncate(limit.max(1) as usize);
+
+        Ok(ReportDiscovery {
+            reports,
+            rate_limit: data.rate_limit_data,
         })
     }
 
@@ -464,8 +487,8 @@ pub struct WarcraftLogsRegion {
 #[serde(rename_all = "camelCase")]
 struct GuildReportsVariables {
     guild_id: i64,
-    start_time: f64,
-    end_time: f64,
+    start_time: Option<f64>,
+    end_time: Option<f64>,
     page: i32,
     limit: i32,
 }
@@ -887,6 +910,76 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn fetches_recent_reports_without_a_time_window() {
+        let responses = vec![
+            json!({
+                "access_token": "test-token",
+                "expires_in": 3600
+            })
+            .to_string(),
+            json!({
+                "data": {
+                    "reportData": {
+                        "reports": {
+                            "current_page": 1,
+                            "has_more_pages": false,
+                            "data": [
+                                {
+                                    "code": "older",
+                                    "title": "Older",
+                                    "startTime": 1000.0,
+                                    "endTime": 2000.0,
+                                    "revision": 0,
+                                    "visibility": "public",
+                                    "zone": null
+                                },
+                                {
+                                    "code": "newer",
+                                    "title": "Newer",
+                                    "startTime": 3000.0,
+                                    "endTime": 4000.0,
+                                    "revision": 0,
+                                    "visibility": "public",
+                                    "zone": {"name": "Test Zone"}
+                                }
+                            ]
+                        }
+                    },
+                    "rateLimitData": {
+                        "limitPerHour": 1000,
+                        "pointsSpentThisHour": 10,
+                        "pointsResetIn": 3000
+                    }
+                }
+            })
+            .to_string(),
+        ];
+        let (base_url, requests) = start_json_server(responses).await;
+        let config = test_config();
+        let client = WarcraftLogsClient::with_endpoints(
+            &config,
+            &format!("{base_url}/oauth"),
+            &format!("{base_url}/graphql"),
+        )
+        .unwrap();
+
+        let discovery = client.recent_reports(42, 3).await.unwrap();
+
+        assert_eq!(
+            discovery
+                .reports
+                .iter()
+                .map(|report| report.code.as_str())
+                .collect::<Vec<_>>(),
+            ["newer", "older"]
+        );
+        let requests = requests.await.unwrap();
+        assert!(requests[1].contains("\"startTime\":null"));
+        assert!(requests[1].contains("\"endTime\":null"));
+        assert!(requests[1].contains("\"limit\":3"));
     }
 
     #[tokio::test]

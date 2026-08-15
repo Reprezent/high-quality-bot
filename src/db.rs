@@ -984,7 +984,7 @@ mod tests {
         let database_url =
             std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set");
         let pool = PgPool::connect(&database_url).await.unwrap();
-        sqlx::raw_sql(include_str!("../migrations/003_warcraft_logs.sql"))
+        sqlx::raw_sql(include_str!("../migrations/004_warcraft_logs.sql"))
             .execute(&pool)
             .await
             .unwrap();

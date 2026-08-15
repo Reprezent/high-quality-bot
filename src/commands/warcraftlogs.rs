@@ -1,7 +1,8 @@
 use crate::{
     Context,
     db::{self, NewWclSubscription},
-    warcraft_logs_tracker,
+    warcraft_logs::WarcraftLogsReport,
+    warcraft_logs_discord, warcraft_logs_tracker,
 };
 use anyhow::Result;
 use chrono::{Duration, Utc};
@@ -11,7 +12,11 @@ use serenity::{ChannelType, GuildChannel, Permissions};
 const BASELINE_LOOKBACK_HOURS: i64 = 24;
 
 /// Configure Warcraft Logs report and boss-kill announcements.
-#[poise::command(slash_command, guild_only, subcommands("track", "untrack", "status"))]
+#[poise::command(
+    slash_command,
+    guild_only,
+    subcommands("track", "untrack", "status", "history")
+)]
 pub async fn warcraftlogs(_: Context<'_>) -> Result<()> {
     Ok(())
 }
@@ -257,6 +262,117 @@ pub async fn status(ctx: Context<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Show the tracked guild's three most recent public reports.
+#[poise::command(slash_command, guild_only)]
+pub async fn history(ctx: Context<'_>) -> Result<()> {
+    ctx.defer_ephemeral().await?;
+    let Some(client) = ctx.data().wcl_client.as_ref() else {
+        ctx.say(
+            "Warcraft Logs tracking is not configured. Set the bot's \
+             `WARCRAFT_LOGS_CLIENT_ID` and `WARCRAFT_LOGS_CLIENT_SECRET` environment variables.",
+        )
+        .await?;
+        return Ok(());
+    };
+    let Some(guild_id) = ctx.guild_id() else {
+        ctx.say("This command can only be used in a Discord server.")
+            .await?;
+        return Ok(());
+    };
+    let Some(subscription) =
+        db::get_wcl_subscription(&ctx.data().db, &guild_id.to_string()).await?
+    else {
+        ctx.say(
+            "This Discord server is not tracking a Warcraft Logs guild yet. \
+             Run `/warcraftlogs track` first.",
+        )
+        .await?;
+        return Ok(());
+    };
+
+    let discovery = match client.recent_reports(subscription.wcl_guild_id, 3).await {
+        Ok(discovery) => discovery,
+        Err(error) => {
+            tracing::error!(
+                error = ?error,
+                wcl_guild_id = subscription.wcl_guild_id,
+                "failed to fetch recent Warcraft Logs reports"
+            );
+            ctx.say(
+                "Warcraft Logs could not load recent reports right now. Please try again later.",
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+    let reports = discovery
+        .reports
+        .iter()
+        .filter(|report| report.visibility.eq_ignore_ascii_case("public"))
+        .take(3)
+        .collect::<Vec<_>>();
+
+    ctx.say(format_recent_reports(
+        &subscription.wcl_guild_name,
+        &reports,
+    ))
+    .await?;
+    Ok(())
+}
+
+fn format_recent_reports(guild_name: &str, reports: &[&WarcraftLogsReport]) -> String {
+    if reports.is_empty() {
+        return format!(
+            "No public Warcraft Logs reports were found for **{}**.",
+            guild_name
+        );
+    }
+
+    let entries = reports
+        .iter()
+        .enumerate()
+        .map(|(index, report)| {
+            let url = warcraft_logs_discord::report_url(&report.code);
+            let title = escape_link_text(&report.title);
+            let zone = report
+                .zone
+                .as_ref()
+                .map_or("Unknown zone", |zone| zone.name.as_str());
+            let timestamp = format_report_timestamp(report.start_time);
+            format!(
+                "{}. **[{}]({})**\n   {} • {}",
+                index + 1,
+                title,
+                url,
+                zone,
+                timestamp
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    format!(
+        "**Recent Warcraft Logs Reports — {}**\n\n{}",
+        guild_name, entries
+    )
+}
+
+fn format_report_timestamp(start_time_ms: f64) -> String {
+    if !start_time_ms.is_finite() || start_time_ms < 0.0 || start_time_ms > i64::MAX as f64 {
+        return "Time unavailable".to_owned();
+    }
+
+    let timestamp = (start_time_ms.round() as i64).div_euclid(1_000);
+    format!("<t:{timestamp}:F> (<t:{timestamp}:R>)")
+}
+
+fn escape_link_text(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+}
+
 fn normalize_region(value: &str) -> Option<&'static str> {
     match value.trim().to_ascii_uppercase().as_str() {
         "US" => Some("US"),
@@ -292,7 +408,8 @@ fn normalize_server_slug(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_region, normalize_server_slug};
+    use super::{format_recent_reports, normalize_region, normalize_server_slug};
+    use crate::warcraft_logs::{WarcraftLogsReport, WarcraftLogsZone};
 
     #[test]
     fn normalizes_region_values() {
@@ -306,5 +423,29 @@ mod tests {
         assert_eq!(normalize_server_slug("Area 52"), "area-52");
         assert_eq!(normalize_server_slug("Zul'jin"), "zuljin");
         assert_eq!(normalize_server_slug("  Tarren  Mill  "), "tarren-mill");
+    }
+
+    #[test]
+    fn formats_three_recent_reports_with_links() {
+        let reports = (1..=3)
+            .map(|index| WarcraftLogsReport {
+                code: format!("code{index}"),
+                title: format!("Report [{index}]"),
+                start_time: f64::from(index) * 1_000.0,
+                end_time: None,
+                revision: 0,
+                visibility: "public".to_owned(),
+                zone: Some(WarcraftLogsZone {
+                    name: "Test Zone".to_owned(),
+                }),
+            })
+            .collect::<Vec<_>>();
+        let references = reports.iter().collect::<Vec<_>>();
+
+        let output = format_recent_reports("Test Guild", &references);
+
+        assert!(output.contains("Recent Warcraft Logs Reports — Test Guild"));
+        assert!(output.contains("[Report \\[1\\]](https://www.warcraftlogs.com/reports/code1)"));
+        assert!(output.contains("<t:3:F> (<t:3:R>)"));
     }
 }

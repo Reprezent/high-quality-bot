@@ -14,6 +14,7 @@ A Discord bot written in Rust that runs World of Warcraft simulations via slash 
 | `/piss` | Fetch the current ISS urine tank fill level from the public ISS telemetry stream. |
 | `/warcraftlogs track <guild> <server> <region> <channel>` | Post new public reports and boss kills for a Warcraft Logs guild. Requires Manage Server. |
 | `/warcraftlogs status` | Show this server's Warcraft Logs tracker status. |
+| `/warcraftlogs history` | Show the tracked guild's three most recent public reports. |
 | `/warcraftlogs untrack` | Stop tracking Warcraft Logs in this server. Requires Manage Server. |
 
 ### Examples
@@ -27,6 +28,7 @@ A Discord bot written in Rust that runs World of Warcraft simulations via slash 
 /piss
 /warcraftlogs track "Example Guild" area-52 US #raid-logs
 /warcraftlogs status
+/warcraftlogs history
 ```
 
 ### Running a gear profile
@@ -147,7 +149,7 @@ The command validates the guild and channel before replacing this Discord server
 
 The initial integration uses bot-level client credentials and intentionally supports **public guild reports only**. Private/unlisted reports and per-user Warcraft Logs OAuth are not supported. Warcraft Logs documents report-table JSON as non-frozen; if a summary payload changes, the bot records and retries the failed summary instead of posting invented metrics.
 
-Use `/warcraftlogs status` to see the destination and latest polling health. Use `/warcraftlogs untrack` to remove the tracker and its stored report/fight state.
+Use `/warcraftlogs status` to see the destination and latest polling health. Use `/warcraftlogs history` to query Warcraft Logs for the tracked guild's three newest public reports, including reports older than the local tracking baseline. Use `/warcraftlogs untrack` to remove the tracker and its stored report/fight state.
 
 ## Using `wowsims/mop` Protobufs in Rust
 
