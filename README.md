@@ -12,6 +12,8 @@ A Discord bot written in Rust that runs World of Warcraft simulations via slash 
 | `/health` | Check if the bot can reach PostgreSQL and the wowsims async API. |
 | `/dailies` | Show when World of Warcraft US realm dailies reset next. |
 | `/piss` | Fetch the current ISS urine tank fill level from the public ISS telemetry stream. |
+| `/pisstory [hours]` | Show recent ISS water and waste telemetry as a graph. |
+| `/pisscribe <channel> <period>` | Post a new 24-hour `/pisstory` graph periodically. Periods use `h`, `d`, or `w` (for example, `2h` or `1w 2d`) and must be at least one hour. Requires Manage Server. |
 | `/warcraftlogs track <channel> [guild_link] [guild] [server] [region] [section]` | Post new public reports and boss kills for a Warcraft Logs guild. Requires Manage Server. |
 | `/warcraftlogs status` | Show this server's Warcraft Logs tracker status. |
 | `/warcraftlogs history` | Show the tracked guild's three most recent public reports. |
@@ -27,6 +29,8 @@ A Discord bot written in Rust that runs World of Warcraft simulations via slash 
 /health
 /dailies
 /piss
+/pisstory hours:24
+/pisscribe channel:#iss-telemetry period:1d
 /warcraftlogs track channel:#raid-logs guild_link:https://classic.warcraftlogs.com/guild/id/484
 /warcraftlogs status
 /warcraftlogs history

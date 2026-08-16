@@ -8,7 +8,7 @@ const IMG_WIDTH: u32 = 800;
 const IMG_HEIGHT: u32 = 400;
 const MAX_X_LABELS: usize = 8;
 
-fn render_chart(samples: &[IssTelemetrySample]) -> Result<Vec<u8>> {
+pub(crate) fn render_chart(samples: &[IssTelemetrySample]) -> Result<Vec<u8>> {
     let mut buf = vec![0u8; (IMG_WIDTH * IMG_HEIGHT * 3) as usize];
 
     {
@@ -104,6 +104,13 @@ fn render_chart(samples: &[IssTelemetrySample]) -> Result<Vec<u8>> {
     encode_png(&buf, IMG_WIDTH, IMG_HEIGHT)
 }
 
+pub(crate) fn chart_content(hours: i64, sample_count: usize) -> String {
+    format!(
+        "🧑‍🚀📈 **ISS Water & Waste** — last {hours} hour{} ({sample_count} samples)",
+        if hours == 1 { "" } else { "s" },
+    )
+}
+
 fn encode_png(rgb: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
     let mut png_bytes: Vec<u8> = Vec::new();
     {
@@ -143,11 +150,7 @@ pub async fn pisstory(
 
     let attachment = CreateAttachment::bytes(image_data, "piss_history.png");
     let reply = poise::CreateReply::default()
-        .content(format!(
-            "🧑‍🚀📈 **ISS Water & Waste** — last {hours} hour{} ({} samples)",
-            if hours == 1 { "" } else { "s" },
-            samples.len(),
-        ))
+        .content(chart_content(hours, samples.len()))
         .attachment(attachment);
 
     ctx.send(reply).await?;
