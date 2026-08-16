@@ -31,6 +31,10 @@ pub async fn create_pool(connect_options: PgConnectOptions) -> Result<PgPool> {
         .execute(&pool)
         .await?;
 
+    sqlx::raw_sql(include_str!("../migrations/005_pisstory_subscriptions.sql"))
+        .execute(&pool)
+        .await?;
+
     Ok(pool)
 }
 
@@ -977,6 +981,135 @@ pub async fn get_iss_telemetry_history(
             processor_status: r.get("processor_status"),
         })
         .collect())
+}
+
+// ---------------------------------------------------------------------------
+// Pisstory subscriptions
+// ---------------------------------------------------------------------------
+
+pub struct PisstorySubscription {
+    pub discord_guild_id: String,
+    pub discord_channel_id: String,
+    pub interval_seconds: i64,
+}
+
+pub async fn upsert_pisstory_subscription(
+    pool: &PgPool,
+    discord_guild_id: &str,
+    discord_channel_id: &str,
+    interval_seconds: i64,
+    next_post_at: DateTime<Utc>,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO pisstory_subscriptions (
+            discord_guild_id, discord_channel_id, interval_seconds, next_post_at
+        )
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (discord_guild_id) DO UPDATE SET
+            discord_channel_id = EXCLUDED.discord_channel_id,
+            interval_seconds = EXCLUDED.interval_seconds,
+            next_post_at = EXCLUDED.next_post_at,
+            last_error = NULL,
+            updated_at = NOW()
+        "#,
+    )
+    .bind(discord_guild_id)
+    .bind(discord_channel_id)
+    .bind(interval_seconds)
+    .bind(next_post_at)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn claim_due_pisstory_subscriptions(pool: &PgPool) -> Result<Vec<PisstorySubscription>> {
+    let rows = sqlx::query(
+        r#"
+        WITH due AS (
+            SELECT discord_guild_id
+            FROM pisstory_subscriptions
+            WHERE next_post_at <= NOW()
+            ORDER BY next_post_at
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE pisstory_subscriptions AS subscription
+        SET next_post_at = NOW()
+                + (subscription.interval_seconds::DOUBLE PRECISION * INTERVAL '1 second'),
+            updated_at = NOW()
+        FROM due
+        WHERE subscription.discord_guild_id = due.discord_guild_id
+        RETURNING subscription.discord_guild_id,
+                  subscription.discord_channel_id,
+                  subscription.interval_seconds
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .iter()
+        .map(|row| PisstorySubscription {
+            discord_guild_id: row.get("discord_guild_id"),
+            discord_channel_id: row.get("discord_channel_id"),
+            interval_seconds: row.get("interval_seconds"),
+        })
+        .collect())
+}
+
+pub async fn mark_pisstory_subscription_posted(
+    pool: &PgPool,
+    discord_guild_id: &str,
+    discord_channel_id: &str,
+    interval_seconds: i64,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE pisstory_subscriptions
+        SET last_posted_at = NOW(),
+            last_error = NULL,
+            updated_at = NOW()
+        WHERE discord_guild_id = $1
+          AND discord_channel_id = $2
+          AND interval_seconds = $3
+        "#,
+    )
+    .bind(discord_guild_id)
+    .bind(discord_channel_id)
+    .bind(interval_seconds)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn mark_pisstory_subscription_failed(
+    pool: &PgPool,
+    discord_guild_id: &str,
+    discord_channel_id: &str,
+    interval_seconds: i64,
+    error: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE pisstory_subscriptions
+        SET next_post_at = NOW() + INTERVAL '5 minutes',
+            last_error = $4,
+            updated_at = NOW()
+        WHERE discord_guild_id = $1
+          AND discord_channel_id = $2
+          AND interval_seconds = $3
+        "#,
+    )
+    .bind(discord_guild_id)
+    .bind(discord_channel_id)
+    .bind(interval_seconds)
+    .bind(error)
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }
 
 #[cfg(test)]

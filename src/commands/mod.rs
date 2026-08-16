@@ -1,5 +1,6 @@
 pub mod dailies;
 pub mod piss;
+pub mod pisscribe;
 pub mod pisstory;
 pub mod sim;
 pub mod status;

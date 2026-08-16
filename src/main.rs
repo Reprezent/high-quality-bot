@@ -4,6 +4,7 @@ mod iss_telemetry;
 mod iss_telemetry_tracker;
 pub mod mop_proto;
 mod parsing;
+mod pisstory_scheduler;
 mod sim_request_codec;
 mod sim_runtime;
 mod sim_runtime_targets;
@@ -114,6 +115,7 @@ async fn main() -> Result<()> {
                 commands::status::status(),
                 commands::version::version(),
                 commands::piss::piss(),
+                commands::pisscribe::pisscribe(),
                 commands::pisstory::pisstory(),
                 commands::warcraftlogs::warcraftlogs(),
             ],
@@ -193,6 +195,8 @@ async fn main() -> Result<()> {
                         "Warcraft Logs tracking is disabled because API credentials are not configured"
                     );
                 }
+
+                pisstory_scheduler::spawn(pool.clone(), ctx.http.clone());
 
                 tracing::info!("Bot is ready!");
                 Ok(Data {
