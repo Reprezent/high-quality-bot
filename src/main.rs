@@ -110,6 +110,7 @@ async fn main() -> Result<()> {
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
             commands: vec![
+                commands::character::character(),
                 commands::dailies::dailies(),
                 commands::sim::sim(),
                 commands::status::status(),
