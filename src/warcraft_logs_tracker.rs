@@ -5,7 +5,7 @@ use crate::{
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use poise::serenity_prelude as serenity;
-use serenity::{ChannelId, CreateMessage, Http};
+use serenity::{ChannelId, CreateAttachment, CreateMessage, Http};
 use sqlx::PgPool;
 use std::{sync::Arc, time::Duration};
 use tokio::task::JoinHandle;
@@ -248,12 +248,17 @@ async fn announce_fights(
             let summary = client
                 .kill_summary(fight.wcl_site, &fight.report_code, fight.fight.fight_id)
                 .await?;
+            let image = warcraft_logs_discord::render_kill_summary(&fight, &summary)?;
             let channel_id = parse_channel_id(&fight.discord_channel_id)?;
             channel_id
                 .send_message(
                     discord_http,
                     CreateMessage::new()
                         .embed(warcraft_logs_discord::kill_embed(&fight, &summary))
+                        .add_file(CreateAttachment::bytes(
+                            image,
+                            warcraft_logs_discord::FIGHT_IMAGE_NAME,
+                        ))
                         .nonce(warcraft_logs_discord::fight_nonce(
                             &fight.report_code,
                             fight.fight.fight_id,

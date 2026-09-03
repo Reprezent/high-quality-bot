@@ -137,7 +137,7 @@ If `DISCORD_GUILD_ID` is set, Discord command updates are usually visible almost
 
 1. Create a Warcraft Logs API v2 client at <https://www.warcraftlogs.com/api/clients/>.
 2. Set both `WARCRAFT_LOGS_CLIENT_ID` and `WARCRAFT_LOGS_CLIENT_SECRET`, then restart the bot.
-3. Give the bot **View Channel**, **Send Messages**, and **Embed Links** permissions in the destination channel.
+3. Give the bot **View Channel**, **Send Messages**, **Embed Links**, and **Attach Files** permissions in the destination channel.
 4. As a member with **Manage Server**, run:
 
    ```text
@@ -156,7 +156,7 @@ The command accepts guild pages from `classic.warcraftlogs.com` and `www.warcraf
 - Posts a link when it discovers a new public report.
 - Tracks active/revised reports and posts one congratulations embed per completed encounter kill.
 - Keeps OAuth, GraphQL, history, and report links on the configured Classic or Retail host.
-- Includes difficulty, kill time, duration, raid size, average item level, top damage and healing, deaths, and a fight-specific report link when those metrics are available.
+- Includes difficulty, kill time, duration, raid size, average item level, deaths, and a fight-specific report link, plus a class-colored fight graphic showing the top three DPS and HPS when those metrics are available.
 - Uses durable cursors and overlapping discovery windows to avoid gaps, plus database uniqueness, confirmation retries, and Discord nonces to minimize duplicate announcements across retries or restarts.
 - Slows polling automatically when Warcraft Logs hourly API points are low.
 
