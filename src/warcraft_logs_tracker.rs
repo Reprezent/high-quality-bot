@@ -248,23 +248,33 @@ async fn announce_fights(
             let summary = client
                 .kill_summary(fight.wcl_site, &fight.report_code, fight.fight.fight_id)
                 .await?;
-            let image = warcraft_logs_discord::render_kill_summary(&fight, &summary)?;
             let channel_id = parse_channel_id(&fight.discord_channel_id)?;
-            channel_id
-                .send_message(
-                    discord_http,
+            let mut message = match warcraft_logs_discord::render_kill_summary(&fight, &summary) {
+                Ok(image) => CreateMessage::new()
+                    .embed(warcraft_logs_discord::kill_embed(&fight, &summary, true))
+                    .add_file(CreateAttachment::bytes(
+                        image,
+                        warcraft_logs_discord::FIGHT_IMAGE_NAME,
+                    )),
+                Err(error) => {
+                    tracing::warn!(
+                        error = ?error,
+                        report_code = %fight.report_code,
+                        fight_id = fight.fight.fight_id,
+                        "failed to render Warcraft Logs fight image; posting without it"
+                    );
                     CreateMessage::new()
-                        .embed(warcraft_logs_discord::kill_embed(&fight, &summary))
-                        .add_file(CreateAttachment::bytes(
-                            image,
-                            warcraft_logs_discord::FIGHT_IMAGE_NAME,
-                        ))
-                        .nonce(warcraft_logs_discord::fight_nonce(
-                            &fight.report_code,
-                            fight.fight.fight_id,
-                        ))
-                        .enforce_nonce(true),
-                )
+                        .embed(warcraft_logs_discord::kill_embed(&fight, &summary, false))
+                }
+            };
+            message = message
+                .nonce(warcraft_logs_discord::fight_nonce(
+                    &fight.report_code,
+                    fight.fight.fight_id,
+                ))
+                .enforce_nonce(true);
+            channel_id
+                .send_message(discord_http, message)
                 .await
                 .context("Discord rejected the boss-kill announcement")
         }

@@ -51,7 +51,11 @@ pub fn report_embed(report: &WclReportToAnnounce) -> CreateEmbed {
     embed
 }
 
-pub fn kill_embed(fight: &WclPendingFight, summary: &KillSummary) -> CreateEmbed {
+pub fn kill_embed(
+    fight: &WclPendingFight,
+    summary: &KillSummary,
+    include_image: bool,
+) -> CreateEmbed {
     let url = fight_url(fight.wcl_site, &fight.report_code, fight.fight.fight_id);
     let duration_ms = (fight.fight.end_time_ms - fight.fight.start_time_ms).max(0);
     let kill_time_ms = fight.report_start_time_ms + fight.fight.end_time_ms;
@@ -86,10 +90,12 @@ pub fn kill_embed(fight: &WclPendingFight, summary: &KillSummary) -> CreateEmbed
         .field("Raid Size", raid_size, true)
         .field("Average Item Level", average_item_level, true)
         .field("Deaths", deaths, true)
-        .image(format!("attachment://{FIGHT_IMAGE_NAME}"))
         .field("Full Report", format!("[View this fight]({url})"), false)
         .footer(CreateEmbedFooter::new("Warcraft Logs boss kill"));
 
+    if include_image {
+        embed = embed.image(format!("attachment://{FIGHT_IMAGE_NAME}"));
+    }
     if let Ok(timestamp) = serenity::Timestamp::from_unix_timestamp(kill_time_ms.div_euclid(1_000))
     {
         embed = embed.timestamp(timestamp);
@@ -104,8 +110,8 @@ pub fn render_kill_summary(fight: &WclPendingFight, summary: &KillSummary) -> Re
         ((fight.fight.end_time_ms - fight.fight.start_time_ms).max(1) as f64 / 1_000.0).max(1.0);
 
     {
-        let root =
-            BitMapBackend::with_buffer(&mut buffer, (IMAGE_WIDTH, IMAGE_HEIGHT)).into_drawing_area();
+        let root = BitMapBackend::with_buffer(&mut buffer, (IMAGE_WIDTH, IMAGE_HEIGHT))
+            .into_drawing_area();
         root.fill(&RGBColor(18, 18, 20))
             .context("failed to fill Warcraft Logs image background")?;
         root.draw(&Rectangle::new(
@@ -155,12 +161,7 @@ pub fn render_kill_summary(fight: &WclPendingFight, summary: &KillSummary) -> Re
     let mut png = Vec::new();
     let encoder = image::codecs::png::PngEncoder::new(&mut png);
     encoder
-        .write_image(
-            &buffer,
-            IMAGE_WIDTH,
-            IMAGE_HEIGHT,
-            image::ColorType::Rgb8,
-        )
+        .write_image(&buffer, IMAGE_WIDTH, IMAGE_HEIGHT, image::ColorType::Rgb8)
         .context("failed to encode Warcraft Logs image")?;
     Ok(png)
 }
@@ -233,19 +234,35 @@ fn draw_metric_section(
         .context("failed to draw class icon label")?;
         root.draw(&Text::new(
             truncate(&entry.name, 24),
+            (109, y + 12),
+            ("sans-serif", 20)
+                .into_font()
+                .style(FontStyle::Bold)
+                .color(&BLACK),
+        ))
+        .context("failed to draw player name shadow")?;
+        root.draw(&Text::new(
+            truncate(&entry.name, 24),
             (108, y + 11),
             ("sans-serif", 20)
                 .into_font()
                 .style(FontStyle::Bold)
-                .color(&text_color(color)),
+                .color(&WHITE),
         ))
         .context("failed to draw player name")?;
+        let metric = format!(
+            "{} {unit}  •  {:.0}%",
+            format_number(entry.total / duration_seconds),
+            ratio * 100.0
+        );
         root.draw(&Text::new(
-            format!(
-                "{} {unit}  •  {:.0}%",
-                format_number(entry.total / duration_seconds),
-                ratio * 100.0
-            ),
+            metric.clone(),
+            (731, y + 13),
+            ("sans-serif", 18).into_font().color(&BLACK),
+        ))
+        .context("failed to draw player metric shadow")?;
+        root.draw(&Text::new(
+            metric,
             (730, y + 12),
             ("sans-serif", 18).into_font().color(&WHITE),
         ))
@@ -274,7 +291,15 @@ fn class_color(class_name: Option<&str>) -> RGBColor {
 }
 
 fn class_icon(class_name: Option<&str>) -> String {
-    let words = class_name.unwrap_or("?").split_whitespace().collect::<Vec<_>>();
+    match class_name.unwrap_or_default().to_ascii_lowercase().as_str() {
+        "deathknight" | "death knight" => return "DK".to_owned(),
+        "demonhunter" | "demon hunter" => return "DH".to_owned(),
+        _ => {}
+    }
+    let words = class_name
+        .unwrap_or("?")
+        .split_whitespace()
+        .collect::<Vec<_>>();
     if words.len() > 1 {
         words
             .iter()
@@ -294,8 +319,9 @@ fn class_icon(class_name: Option<&str>) -> String {
 }
 
 fn text_color(background: RGBColor) -> RGBColor {
-    let brightness =
-        0.299 * f64::from(background.0) + 0.587 * f64::from(background.1) + 0.114 * f64::from(background.2);
+    let brightness = 0.299 * f64::from(background.0)
+        + 0.587 * f64::from(background.1)
+        + 0.114 * f64::from(background.2);
     if brightness > 155.0 {
         RGBColor(18, 18, 20)
     } else {
@@ -372,8 +398,16 @@ fn truncate(value: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{fight_nonce, fight_url, format_duration, format_number, report_url};
-    use crate::warcraft_logs::WarcraftLogsSite;
+    use super::{
+        IMAGE_HEIGHT, IMAGE_WIDTH, class_color, fight_nonce, fight_url, format_duration,
+        format_number, render_kill_summary, report_url,
+    };
+    use crate::{
+        db::{WclFightRecord, WclPendingFight},
+        warcraft_logs::{KillSummary, MetricEntry, WarcraftLogsSite},
+    };
+    use image::GenericImageView;
+    use plotters::style::RGBColor;
     use poise::serenity_prelude::Nonce;
 
     #[test]
@@ -406,5 +440,49 @@ mod tests {
             panic!("expected string nonce");
         };
         assert_eq!(second_value, value);
+    }
+
+    #[test]
+    fn renders_class_colored_metric_bars_as_png() {
+        let fight = WclPendingFight {
+            subscription_id: 1,
+            discord_channel_id: "1".to_owned(),
+            wcl_site: WarcraftLogsSite::Retail,
+            wcl_guild_name: "Guild".to_owned(),
+            report_code: "abc123".to_owned(),
+            report_title: "Raid".to_owned(),
+            report_start_time_ms: 0,
+            fight: WclFightRecord {
+                fight_id: 7,
+                boss_name: "Test Boss".to_owned(),
+                difficulty: Some(5),
+                raid_size: Some(20),
+                average_item_level: Some(700.0),
+                start_time_ms: 0,
+                end_time_ms: 120_000,
+            },
+        };
+        let damage = vec![
+            MetricEntry {
+                name: "First".to_owned(),
+                total: 1_200_000.0,
+                class_name: Some("Mage".to_owned()),
+            },
+            MetricEntry {
+                name: "Second".to_owned(),
+                total: 600_000.0,
+                class_name: Some("Warrior".to_owned()),
+            },
+        ];
+        let summary = KillSummary {
+            top_damage: Some(damage.clone()),
+            top_healing: Some(damage),
+            deaths: Some(0),
+        };
+
+        let png = render_kill_summary(&fight, &summary).unwrap();
+        let decoded = image::load_from_memory(&png).unwrap();
+        assert_eq!(decoded.dimensions(), (IMAGE_WIDTH, IMAGE_HEIGHT));
+        assert_eq!(class_color(Some("Mage")), RGBColor(63, 199, 235));
     }
 }

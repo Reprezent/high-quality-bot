@@ -842,14 +842,10 @@ fn parse_metric_entries(table: &Value, label: &str) -> Result<Option<Vec<MetricE
                 name: entry.get("name")?.as_str()?.to_owned(),
                 total: entry.get("total")?.as_f64()?,
                 class_name: entry
-                    .get("type")
+                    .get("icon")
                     .and_then(Value::as_str)
-                    .or_else(|| {
-                        entry
-                            .get("icon")
-                            .and_then(Value::as_str)
-                            .and_then(|icon| icon.split('-').next())
-                    })
+                    .and_then(|icon| icon.split('-').next())
+                    .or_else(|| entry.get("type").and_then(Value::as_str))
                     .map(str::to_owned),
             })
         })
