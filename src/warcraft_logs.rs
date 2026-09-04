@@ -814,6 +814,7 @@ struct KillSummaryTables {
 pub struct MetricEntry {
     pub name: String,
     pub total: f64,
+    pub class_name: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -840,6 +841,12 @@ fn parse_metric_entries(table: &Value, label: &str) -> Result<Option<Vec<MetricE
             Some(MetricEntry {
                 name: entry.get("name")?.as_str()?.to_owned(),
                 total: entry.get("total")?.as_f64()?,
+                class_name: entry
+                    .get("icon")
+                    .and_then(Value::as_str)
+                    .and_then(|icon| icon.split('-').next())
+                    .or_else(|| entry.get("type").and_then(Value::as_str))
+                    .map(str::to_owned),
             })
         })
         .collect::<Vec<_>>();
@@ -992,8 +999,8 @@ mod tests {
         let table = json!({
             "data": {
                 "entries": [
-                    {"name": "Third", "total": 30.0},
-                    {"name": "First", "total": 100.0},
+                    {"name": "Third", "total": 30.0, "icon": "Priest-Discipline"},
+                    {"name": "First", "total": 100.0, "type": "Mage"},
                     {"name": "Fourth", "total": 10.0},
                     {"name": "Second", "total": 50.0}
                 ]
@@ -1008,6 +1015,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["First", "Second", "Third"]
         );
+        assert_eq!(entries[0].class_name.as_deref(), Some("Mage"));
+        assert_eq!(entries[2].class_name.as_deref(), Some("Priest"));
     }
 
     #[test]
