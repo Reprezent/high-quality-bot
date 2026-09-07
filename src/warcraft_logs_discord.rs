@@ -5,6 +5,7 @@ use crate::{
 use anyhow::{Context as _, Result};
 use image::{ImageEncoder, RgbImage};
 use plotters::prelude::*;
+use plotters::style::text_anchor::{HPos, Pos, VPos};
 use poise::serenity_prelude as serenity;
 use serenity::{CreateEmbed, CreateEmbedFooter, Nonce};
 use std::{
@@ -180,6 +181,7 @@ fn render_kill_summary_with_icons(
             "Damage Done",
             "DPS",
             summary.top_damage.as_deref(),
+            summary.total_damage,
             icons,
             duration_seconds,
             94,
@@ -189,6 +191,7 @@ fn render_kill_summary_with_icons(
             "Healing Done",
             "HPS",
             summary.top_healing.as_deref(),
+            summary.total_healing,
             icons,
             duration_seconds,
             310,
@@ -318,25 +321,30 @@ async fn fetch_spec_icon(file_name: &str) -> Result<RgbImage> {
 fn draw_metric_section(
     root: &DrawingArea<BitMapBackend<'_>, plotters::coord::Shift>,
     heading: &str,
-    unit: &str,
+    rate_label: &str,
     entries: Option<&[MetricEntry]>,
+    fight_total: Option<f64>,
     icons: &HashMap<String, RgbImage>,
     duration_seconds: f64,
     top: i32,
 ) -> Result<()> {
+    let section_heading = fight_total.map_or_else(
+        || heading.to_owned(),
+        |total| format!("{heading}  •  {} total", format_number(total)),
+    );
     root.draw(&Text::new(
-        heading,
+        section_heading,
         (44, top),
         ("sans-serif", 17)
             .into_font()
+            .style(FontStyle::Bold)
             .color(&RGBColor(242, 140, 40)),
     ))
     .context("failed to draw metric heading")?;
-
     let Some(entries) = entries.filter(|entries| !entries.is_empty()) else {
         root.draw(&Text::new(
             "No data available",
-            (BAR_LEFT, top + 49),
+            (BAR_LEFT, top + 55),
             ("sans-serif", 18)
                 .into_font()
                 .color(&RGBColor(150, 150, 157)),
@@ -344,17 +352,30 @@ fn draw_metric_section(
         .context("failed to draw unavailable metric label")?;
         return Ok(());
     };
+    for (label, x) in [(rate_label, 680), ("TOTAL", 835), ("SHARE", 956)] {
+        root.draw(&Text::new(
+            label,
+            (x, top + 2),
+            ("sans-serif", 14)
+                .into_font()
+                .style(FontStyle::Bold)
+                .color(&RGBColor(205, 205, 212))
+                .pos(Pos::new(HPos::Right, VPos::Top)),
+        ))
+        .context("failed to draw metric column heading")?;
+    }
     let highest = entries[0].total.max(0.0);
 
     for (index, entry) in entries.iter().take(3).enumerate() {
-        let y = top + 22 + index as i32 * 58;
-        let ratio = if highest > 0.0 {
+        let y = top + 30 + index as i32 * 58;
+        let bar_ratio = if highest > 0.0 {
             (entry.total / highest).clamp(0.0, 1.0)
         } else {
             0.0
         };
+        let share = metric_share(entry.total, fight_total);
         let color = class_color(entry.class_name.as_deref());
-        let filled_right = BAR_LEFT + ((BAR_RIGHT - BAR_LEFT) as f64 * ratio).round() as i32;
+        let filled_right = BAR_LEFT + ((BAR_RIGHT - BAR_LEFT) as f64 * bar_ratio).round() as i32;
 
         root.draw(&Rectangle::new(
             [(BAR_LEFT, y), (BAR_RIGHT, y + BAR_HEIGHT)],
@@ -364,7 +385,7 @@ fn draw_metric_section(
         if filled_right > BAR_LEFT {
             root.draw(&Rectangle::new(
                 [(BAR_LEFT, y), (filled_right, y + BAR_HEIGHT)],
-                color.filled(),
+                color.mix(0.68).filled(),
             ))
             .context("failed to draw class-colored metric bar")?;
         }
@@ -389,50 +410,84 @@ fn draw_metric_section(
             .context("failed to draw class icon fallback")?;
             root.draw(&Text::new(
                 class_icon(entry.class_name.as_deref()),
-                (52, y + 10),
+                (63, y + BAR_HEIGHT / 2),
                 ("sans-serif", 18)
                     .into_font()
                     .style(FontStyle::Bold)
-                    .color(&text_color(color)),
+                    .color(&text_color(color))
+                    .pos(Pos::new(HPos::Center, VPos::Center)),
             ))
             .context("failed to draw class icon fallback label")?;
         }
-        root.draw(&Text::new(
-            truncate(&entry.name, 24),
-            (109, y + 12),
-            ("sans-serif", 20)
-                .into_font()
-                .style(FontStyle::Bold)
-                .color(&BLACK),
-        ))
-        .context("failed to draw player name shadow")?;
-        root.draw(&Text::new(
-            truncate(&entry.name, 24),
-            (108, y + 11),
-            ("sans-serif", 20)
-                .into_font()
-                .style(FontStyle::Bold)
-                .color(&WHITE),
-        ))
-        .context("failed to draw player name")?;
-        let metric = format!(
-            "{} {unit}  •  {:.0}%",
-            format_number(entry.total / duration_seconds),
-            ratio * 100.0
-        );
-        root.draw(&Text::new(
-            metric.clone(),
-            (731, y + 13),
-            ("sans-serif", 18).into_font().color(&BLACK),
-        ))
-        .context("failed to draw player metric shadow")?;
-        root.draw(&Text::new(
-            metric,
-            (730, y + 12),
-            ("sans-serif", 18).into_font().color(&WHITE),
-        ))
-        .context("failed to draw player metric")?;
+        let center_y = y + BAR_HEIGHT / 2;
+        draw_readable_text(
+            root,
+            &truncate(&entry.name, 24),
+            (108, center_y),
+            20,
+            HPos::Left,
+        )?;
+        draw_readable_text(
+            root,
+            &format_number(entry.total / duration_seconds),
+            (680, center_y),
+            18,
+            HPos::Right,
+        )?;
+        draw_readable_text(
+            root,
+            &format_number(entry.total),
+            (835, center_y),
+            18,
+            HPos::Right,
+        )?;
+        draw_readable_text(
+            root,
+            &format!("{:.1}%", share * 100.0),
+            (956, center_y),
+            18,
+            HPos::Right,
+        )?;
     }
+    Ok(())
+}
+
+fn metric_share(value: f64, fight_total: Option<f64>) -> f64 {
+    fight_total
+        .filter(|total| *total > 0.0)
+        .map_or(0.0, |total| (value / total).clamp(0.0, 1.0))
+}
+
+fn draw_readable_text(
+    root: &DrawingArea<BitMapBackend<'_>, plotters::coord::Shift>,
+    text: &str,
+    position: (i32, i32),
+    size: u32,
+    horizontal_position: HPos,
+) -> Result<()> {
+    let anchor = Pos::new(horizontal_position, VPos::Center);
+    for offset in [(-2, 0), (2, 0), (0, -2), (0, 2)] {
+        root.draw(&Text::new(
+            text.to_owned(),
+            (position.0 + offset.0, position.1 + offset.1),
+            ("sans-serif", size)
+                .into_font()
+                .style(FontStyle::Bold)
+                .color(&BLACK)
+                .pos(anchor),
+        ))
+        .context("failed to draw metric text outline")?;
+    }
+    root.draw(&Text::new(
+        text.to_owned(),
+        position,
+        ("sans-serif", size)
+            .into_font()
+            .style(FontStyle::Bold)
+            .color(&WHITE)
+            .pos(anchor),
+    ))
+    .context("failed to draw metric text")?;
     Ok(())
 }
 
@@ -611,8 +666,8 @@ fn truncate(value: &str, max_chars: usize) -> String {
 mod tests {
     use super::{
         FIGHT_BACKGROUND, IMAGE_HEIGHT, IMAGE_WIDTH, background_buffer, class_color, fight_nonce,
-        fight_url, format_duration, format_number, render_kill_summary_with_icons, report_url,
-        spec_icon_file,
+        fight_url, format_duration, format_number, metric_share, render_kill_summary_with_icons,
+        report_url, spec_icon_file,
     };
     use crate::{
         db::{WclFightRecord, WclPendingFight},
@@ -641,6 +696,8 @@ mod tests {
         assert_eq!(format_number(999.0), "999");
         assert_eq!(format_number(12_345.0), "12.3K");
         assert_eq!(format_number(9_876_543.0), "9.88M");
+        assert_eq!(metric_share(25.0, Some(100.0)), 0.25);
+        assert_eq!(metric_share(25.0, None), 0.0);
     }
 
     #[test]
@@ -690,7 +747,9 @@ mod tests {
             },
         ];
         let summary = KillSummary {
+            total_damage: Some(1_800_000.0),
             top_damage: Some(damage.clone()),
+            total_healing: Some(1_800_000.0),
             top_healing: Some(damage),
             deaths: Some(0),
         };
@@ -720,7 +779,9 @@ mod tests {
             icon_name: Some("Mage-Arcane".to_owned()),
         };
         let summary = KillSummary {
+            total_damage: Some(1_200_000.0),
             top_damage: Some(vec![entry]),
+            total_healing: None,
             top_healing: None,
             deaths: Some(0),
         };

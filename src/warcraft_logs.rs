@@ -447,9 +447,13 @@ impl WarcraftLogsClient {
             .report
             .ok_or_else(|| anyhow!("Warcraft Logs report {code} was not found"))?;
 
+        let damage = parse_metric_entries(&report.damage, "damage")?;
+        let healing = parse_metric_entries(&report.healing, "healing")?;
         Ok(KillSummary {
-            top_damage: parse_metric_entries(&report.damage, "damage")?,
-            top_healing: parse_metric_entries(&report.healing, "healing")?,
+            total_damage: damage.as_ref().map(|metrics| metrics.total),
+            top_damage: damage.map(|metrics| metrics.entries),
+            total_healing: healing.as_ref().map(|metrics| metrics.total),
+            top_healing: healing.map(|metrics| metrics.entries),
             deaths: parse_death_count(&report.summary, &report.deaths)?,
         })
     }
@@ -821,11 +825,19 @@ pub struct MetricEntry {
 #[derive(Clone, Debug, PartialEq)]
 pub struct KillSummary {
     pub top_damage: Option<Vec<MetricEntry>>,
+    pub total_damage: Option<f64>,
     pub top_healing: Option<Vec<MetricEntry>>,
+    pub total_healing: Option<f64>,
     pub deaths: Option<u64>,
 }
 
-fn parse_metric_entries(table: &Value, label: &str) -> Result<Option<Vec<MetricEntry>>> {
+#[derive(Debug, PartialEq)]
+struct MetricSummary {
+    entries: Vec<MetricEntry>,
+    total: f64,
+}
+
+fn parse_metric_entries(table: &Value, label: &str) -> Result<Option<MetricSummary>> {
     if table.is_null() {
         return Ok(None);
     }
@@ -852,10 +864,14 @@ fn parse_metric_entries(table: &Value, label: &str) -> Result<Option<Vec<MetricE
             })
         })
         .collect::<Vec<_>>();
+    let total = parsed.iter().map(|entry| entry.total.max(0.0)).sum();
     parsed.sort_by(|left, right| right.total.total_cmp(&left.total));
     parsed.truncate(3);
 
-    Ok(Some(parsed))
+    Ok(Some(MetricSummary {
+        entries: parsed,
+        total,
+    }))
 }
 
 fn parse_death_count(summary: &Value, deaths: &Value) -> Result<Option<u64>> {
@@ -1009,7 +1025,8 @@ mod tests {
             }
         });
 
-        let entries = parse_metric_entries(&table, "damage").unwrap().unwrap();
+        let metrics = parse_metric_entries(&table, "damage").unwrap().unwrap();
+        let entries = &metrics.entries;
         assert_eq!(
             entries
                 .iter()
@@ -1020,6 +1037,7 @@ mod tests {
         assert_eq!(entries[0].class_name.as_deref(), Some("Mage"));
         assert_eq!(entries[2].class_name.as_deref(), Some("Priest"));
         assert_eq!(entries[2].icon_name.as_deref(), Some("Priest-Discipline"));
+        assert_eq!(metrics.total, 190.0);
     }
 
     #[test]
