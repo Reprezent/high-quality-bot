@@ -10,8 +10,7 @@ use serenity::{CreateEmbed, CreateEmbedFooter, Nonce};
 
 const WARCRAFT_LOGS_COLOR: u32 = 0xF28C28;
 pub const FIGHT_IMAGE_NAME: &str = "warcraft_logs_fight.png";
-const FIGHT_BACKGROUND: &[u8] =
-    include_bytes!("../assets/warcraft_logs_background.png");
+const FIGHT_BACKGROUND: &[u8] = include_bytes!("../assets/warcraft_logs_background.png");
 const IMAGE_WIDTH: u32 = 1_000;
 const IMAGE_HEIGHT: u32 = 540;
 const BAR_LEFT: i32 = 92;
@@ -509,10 +508,7 @@ mod tests {
     #[test]
     fn loads_bundled_background_at_canvas_size() {
         let background = background_buffer(FIGHT_BACKGROUND).unwrap();
-        assert_eq!(
-            background.len(),
-            (IMAGE_WIDTH * IMAGE_HEIGHT * 3) as usize
-        );
+        assert_eq!(background.len(), (IMAGE_WIDTH * IMAGE_HEIGHT * 3) as usize);
         assert!(background.windows(2).any(|pixels| pixels[0] != pixels[1]));
         assert!(background_buffer(b"not an image").is_err());
     }
