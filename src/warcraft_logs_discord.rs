@@ -10,6 +10,8 @@ use serenity::{CreateEmbed, CreateEmbedFooter, Nonce};
 
 const WARCRAFT_LOGS_COLOR: u32 = 0xF28C28;
 pub const FIGHT_IMAGE_NAME: &str = "warcraft_logs_fight.png";
+const FIGHT_BACKGROUND: &[u8] =
+    include_bytes!("../assets/warcraft_logs_background.png");
 const IMAGE_WIDTH: u32 = 1_000;
 const IMAGE_HEIGHT: u32 = 540;
 const BAR_LEFT: i32 = 92;
@@ -105,18 +107,24 @@ pub fn kill_embed(
 }
 
 pub fn render_kill_summary(fight: &WclPendingFight, summary: &KillSummary) -> Result<Vec<u8>> {
-    let mut buffer = vec![0_u8; (IMAGE_WIDTH * IMAGE_HEIGHT * 3) as usize];
+    let mut buffer = background_buffer(FIGHT_BACKGROUND).unwrap_or_else(|error| {
+        tracing::warn!(error = ?error, "failed to decode bundled fight background; using solid fill");
+        vec![18_u8; (IMAGE_WIDTH * IMAGE_HEIGHT * 3) as usize]
+    });
     let duration_seconds =
         ((fight.fight.end_time_ms - fight.fight.start_time_ms).max(1) as f64 / 1_000.0).max(1.0);
 
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (IMAGE_WIDTH, IMAGE_HEIGHT))
             .into_drawing_area();
-        root.fill(&RGBColor(18, 18, 20))
-            .context("failed to fill Warcraft Logs image background")?;
+        root.draw(&Rectangle::new(
+            [(0, 0), (IMAGE_WIDTH as i32, IMAGE_HEIGHT as i32)],
+            RGBColor(8, 8, 11).mix(0.28).filled(),
+        ))
+        .context("failed to shade Warcraft Logs image background")?;
         root.draw(&Rectangle::new(
             [(0, 0), (IMAGE_WIDTH as i32, 72)],
-            RGBColor(31, 31, 35).filled(),
+            RGBColor(24, 24, 28).mix(0.88).filled(),
         ))
         .context("failed to draw Warcraft Logs image header")?;
         root.draw(&Text::new(
@@ -164,6 +172,18 @@ pub fn render_kill_summary(fight: &WclPendingFight, summary: &KillSummary) -> Re
         .write_image(&buffer, IMAGE_WIDTH, IMAGE_HEIGHT, image::ColorType::Rgb8)
         .context("failed to encode Warcraft Logs image")?;
     Ok(png)
+}
+
+fn background_buffer(bytes: &[u8]) -> Result<Vec<u8>> {
+    let background =
+        image::load_from_memory(bytes).context("background asset is not a valid image")?;
+    Ok(image::imageops::resize(
+        &background.to_rgb8(),
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+        image::imageops::FilterType::Lanczos3,
+    )
+    .into_raw())
 }
 
 fn draw_metric_section(
@@ -399,8 +419,8 @@ fn truncate(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        IMAGE_HEIGHT, IMAGE_WIDTH, class_color, fight_nonce, fight_url, format_duration,
-        format_number, render_kill_summary, report_url,
+        FIGHT_BACKGROUND, IMAGE_HEIGHT, IMAGE_WIDTH, background_buffer, class_color, fight_nonce,
+        fight_url, format_duration, format_number, render_kill_summary, report_url,
     };
     use crate::{
         db::{WclFightRecord, WclPendingFight},
@@ -484,5 +504,16 @@ mod tests {
         let decoded = image::load_from_memory(&png).unwrap();
         assert_eq!(decoded.dimensions(), (IMAGE_WIDTH, IMAGE_HEIGHT));
         assert_eq!(class_color(Some("Mage")), RGBColor(63, 199, 235));
+    }
+
+    #[test]
+    fn loads_bundled_background_at_canvas_size() {
+        let background = background_buffer(FIGHT_BACKGROUND).unwrap();
+        assert_eq!(
+            background.len(),
+            (IMAGE_WIDTH * IMAGE_HEIGHT * 3) as usize
+        );
+        assert!(background.windows(2).any(|pixels| pixels[0] != pixels[1]));
+        assert!(background_buffer(b"not an image").is_err());
     }
 }
