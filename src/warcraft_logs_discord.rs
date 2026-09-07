@@ -8,6 +8,7 @@ use plotters::prelude::*;
 use poise::serenity_prelude as serenity;
 use serenity::{CreateEmbed, CreateEmbedFooter, Nonce};
 
+// 
 const WARCRAFT_LOGS_COLOR: u32 = 0xF28C28;
 pub const FIGHT_IMAGE_NAME: &str = "warcraft_logs_fight.png";
 const FIGHT_BACKGROUND: &[u8] = include_bytes!("../assets/warcraft_logs_background.png");
@@ -25,6 +26,7 @@ pub fn fight_url(site: WarcraftLogsSite, code: &str, fight_id: i32) -> String {
     format!("{}#fight={fight_id}&type=summary", site.report_url(code))
 }
 
+// Creates an embed for discord upon a new report being made.
 pub fn report_embed(report: &WclReportToAnnounce) -> CreateEmbed {
     let url = report_url(report.wcl_site, &report.code);
     let mut embed = CreateEmbed::new()
@@ -78,17 +80,19 @@ pub fn kill_embed(
     let mut embed = CreateEmbed::new()
         .color(0x2ECC71)
         .title(truncate(
-            &format!("Congratulations! {} defeated", fight.fight.boss_name),
+            &format!(
+                "Congratulations {}! {} {} is killed!",
+                fight.wcl_guild_name,
+                difficulty_name(fight.fight.difficulty),
+                fight.fight.boss_name
+            ),
             256,
         ))
         .url(&url)
         .description(format!(
-            "**{}** defeated **{}** in [{}]({url}).",
-            fight.wcl_guild_name, fight.fight.boss_name, fight.report_title
+            "{} player **{} {}** in {} - [{}]({url}).",
+            raid_size, difficulty_name(fight.fight.difficulty), fight.fight.boss_name, format_duration(duration_ms), fight.report_title
         ))
-        .field("Difficulty", difficulty_name(fight.fight.difficulty), true)
-        .field("Duration", format_duration(duration_ms), true)
-        .field("Raid Size", raid_size, true)
         .field("Average Item Level", average_item_level, true)
         .field("Deaths", deaths, true)
         .field("Full Report", format!("[View this fight]({url})"), false)
@@ -147,7 +151,7 @@ pub fn render_kill_summary(fight: &WclPendingFight, summary: &KillSummary) -> Re
 
         draw_metric_section(
             &root,
-            "DAMAGE PER SECOND",
+            "Damage Done",
             "DPS",
             summary.top_damage.as_deref(),
             duration_seconds,
@@ -155,7 +159,7 @@ pub fn render_kill_summary(fight: &WclPendingFight, summary: &KillSummary) -> Re
         )?;
         draw_metric_section(
             &root,
-            "HEALING PER SECOND",
+            "Healing Done",
             "HPS",
             summary.top_healing.as_deref(),
             duration_seconds,
