@@ -601,7 +601,7 @@ pub async fn summary(
         report_start_time_ms: warcraft_logs_tracker::absolute_milliseconds(details.start_time)?,
         fight: fight.clone(),
     };
-    let reply = match warcraft_logs_discord::render_kill_summary(&preview, &kill_summary) {
+    let reply = match warcraft_logs_discord::render_kill_summary(&preview, &kill_summary).await {
         Ok(image) => poise::CreateReply::default()
             .embed(warcraft_logs_discord::kill_embed(
                 &preview,

@@ -815,6 +815,7 @@ pub struct MetricEntry {
     pub name: String,
     pub total: f64,
     pub class_name: Option<String>,
+    pub icon_name: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -847,6 +848,7 @@ fn parse_metric_entries(table: &Value, label: &str) -> Result<Option<Vec<MetricE
                     .and_then(|icon| icon.split('-').next())
                     .or_else(|| entry.get("type").and_then(Value::as_str))
                     .map(str::to_owned),
+                icon_name: entry.get("icon").and_then(Value::as_str).map(str::to_owned),
             })
         })
         .collect::<Vec<_>>();
@@ -1017,6 +1019,7 @@ mod tests {
         );
         assert_eq!(entries[0].class_name.as_deref(), Some("Mage"));
         assert_eq!(entries[2].class_name.as_deref(), Some("Priest"));
+        assert_eq!(entries[2].icon_name.as_deref(), Some("Priest-Discipline"));
     }
 
     #[test]
