@@ -2,10 +2,32 @@ use crate::{
     db::{WclPendingFight, WclReportToAnnounce},
     warcraft_logs::{KillSummary, MetricEntry, WarcraftLogsSite},
 };
+use anyhow::{Context as _, Result};
+use image::{ImageEncoder, RgbImage};
+use plotters::prelude::*;
+use plotters::style::text_anchor::{HPos, Pos, VPos};
 use poise::serenity_prelude as serenity;
 use serenity::{CreateEmbed, CreateEmbedFooter, Nonce};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Mutex, OnceLock},
+    time::Duration,
+};
 
+//
 const WARCRAFT_LOGS_COLOR: u32 = 0xF28C28;
+pub const FIGHT_IMAGE_NAME: &str = "warcraft_logs_fight.png";
+const FIGHT_BACKGROUND: &[u8] = include_bytes!("../assets/warcraft_logs_background.png");
+const IMAGE_WIDTH: u32 = 1_000;
+const IMAGE_HEIGHT: u32 = 540;
+const BAR_LEFT: i32 = 92;
+const BAR_RIGHT: i32 = 956;
+const SHARE_RIGHT: i32 = BAR_RIGHT - 24;
+const BAR_HEIGHT: i32 = 46;
+const ICON_SIZE: u32 = 38;
+const ICON_CDN: &str = "https://render.worldofwarcraft.com/us/icons/56";
+static ICON_CACHE: OnceLock<Mutex<HashMap<String, Option<RgbImage>>>> = OnceLock::new();
+static ICON_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 pub fn report_url(site: WarcraftLogsSite, code: &str) -> String {
     site.report_url(code)
@@ -15,6 +37,7 @@ pub fn fight_url(site: WarcraftLogsSite, code: &str, fight_id: i32) -> String {
     format!("{}#fight={fight_id}&type=summary", site.report_url(code))
 }
 
+// Creates an embed for discord upon a new report being made.
 pub fn report_embed(report: &WclReportToAnnounce) -> CreateEmbed {
     let url = report_url(report.wcl_site, &report.code);
     let mut embed = CreateEmbed::new()
@@ -42,7 +65,11 @@ pub fn report_embed(report: &WclReportToAnnounce) -> CreateEmbed {
     embed
 }
 
-pub fn kill_embed(fight: &WclPendingFight, summary: &KillSummary) -> CreateEmbed {
+pub fn kill_embed(
+    fight: &WclPendingFight,
+    summary: &KillSummary,
+    include_image: bool,
+) -> CreateEmbed {
     let url = fight_url(fight.wcl_site, &fight.report_code, fight.fight.fight_id);
     let duration_ms = (fight.fight.end_time_ms - fight.fight.start_time_ms).max(0);
     let kill_time_ms = fight.report_start_time_ms + fight.fight.end_time_ms;
@@ -64,38 +91,509 @@ pub fn kill_embed(fight: &WclPendingFight, summary: &KillSummary) -> CreateEmbed
     let mut embed = CreateEmbed::new()
         .color(0x2ECC71)
         .title(truncate(
-            &format!("Congratulations! {} defeated", fight.fight.boss_name),
+            &format!(
+                "Congratulations {}! {} {} is killed!",
+                fight.wcl_guild_name,
+                difficulty_name(fight.fight.difficulty),
+                fight.fight.boss_name
+            ),
             256,
         ))
         .url(&url)
         .description(format!(
-            "**{}** defeated **{}** in [{}]({url}).",
-            fight.wcl_guild_name, fight.fight.boss_name, fight.report_title
+            "{} player **{} {}** in {} - [{}]({url}).",
+            raid_size,
+            difficulty_name(fight.fight.difficulty),
+            fight.fight.boss_name,
+            format_duration(duration_ms),
+            fight.report_title
         ))
-        .field("Difficulty", difficulty_name(fight.fight.difficulty), true)
-        .field("Duration", format_duration(duration_ms), true)
-        .field("Raid Size", raid_size, true)
         .field("Average Item Level", average_item_level, true)
         .field("Deaths", deaths, true)
-        .field(
-            "Top Damage",
-            format_metric_entries(summary.top_damage.as_deref()),
-            false,
-        )
-        .field(
-            "Top Healing",
-            format_metric_entries(summary.top_healing.as_deref()),
-            false,
-        )
         .field("Full Report", format!("[View this fight]({url})"), false)
         .footer(CreateEmbedFooter::new("Warcraft Logs boss kill"));
 
+    if include_image {
+        embed = embed.image(format!("attachment://{FIGHT_IMAGE_NAME}"));
+    }
     if let Ok(timestamp) = serenity::Timestamp::from_unix_timestamp(kill_time_ms.div_euclid(1_000))
     {
         embed = embed.timestamp(timestamp);
     }
 
     embed
+}
+
+pub async fn render_kill_summary(
+    fight: &WclPendingFight,
+    summary: &KillSummary,
+) -> Result<Vec<u8>> {
+    let icons = load_summary_icons(summary).await;
+    render_kill_summary_with_icons(fight, summary, &icons)
+}
+
+fn render_kill_summary_with_icons(
+    fight: &WclPendingFight,
+    summary: &KillSummary,
+    icons: &HashMap<String, RgbImage>,
+) -> Result<Vec<u8>> {
+    let background = background_image(FIGHT_BACKGROUND).unwrap_or_else(|error| {
+        tracing::warn!(error = ?error, "failed to decode bundled fight background; using solid fill");
+        RgbImage::from_pixel(IMAGE_WIDTH, IMAGE_HEIGHT, image::Rgb([18, 18, 18]))
+    });
+    let mut buffer = background.into_raw();
+    let duration_seconds =
+        ((fight.fight.end_time_ms - fight.fight.start_time_ms).max(1) as f64 / 1_000.0).max(1.0);
+
+    {
+        let root = BitMapBackend::with_buffer(&mut buffer, (IMAGE_WIDTH, IMAGE_HEIGHT))
+            .into_drawing_area();
+        root.draw(&Rectangle::new(
+            [(0, 0), (IMAGE_WIDTH as i32, IMAGE_HEIGHT as i32)],
+            RGBColor(8, 8, 11).mix(0.28).filled(),
+        ))
+        .context("failed to shade Warcraft Logs image background")?;
+        root.draw(&Rectangle::new(
+            [(0, 0), (IMAGE_WIDTH as i32, 72)],
+            RGBColor(24, 24, 28).mix(0.88).filled(),
+        ))
+        .context("failed to draw Warcraft Logs image header")?;
+        root.draw(&Text::new(
+            truncate(&fight.fight.boss_name, 42),
+            (44, 21),
+            ("sans-serif", 30).into_font().color(&WHITE),
+        ))
+        .context("failed to draw fight title")?;
+        root.draw(&Text::new(
+            format!(
+                "{}  •  {}",
+                difficulty_name(fight.fight.difficulty),
+                format_duration(fight.fight.end_time_ms - fight.fight.start_time_ms)
+            ),
+            (44, 52),
+            ("sans-serif", 16)
+                .into_font()
+                .color(&RGBColor(174, 174, 181)),
+        ))
+        .context("failed to draw fight details")?;
+
+        draw_metric_section(
+            &root,
+            "Damage Done",
+            "DPS",
+            summary.top_damage.as_deref(),
+            summary.total_damage,
+            icons,
+            duration_seconds,
+            94,
+        )?;
+        draw_metric_section(
+            &root,
+            "Healing Done",
+            "HPS",
+            summary.top_healing.as_deref(),
+            summary.total_healing,
+            icons,
+            duration_seconds,
+            310,
+        )?;
+        root.present()
+            .context("failed to finish Warcraft Logs image")?;
+    }
+
+    let mut png = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new(&mut png);
+    encoder
+        .write_image(&buffer, IMAGE_WIDTH, IMAGE_HEIGHT, image::ColorType::Rgb8)
+        .context("failed to encode Warcraft Logs image")?;
+    Ok(png)
+}
+
+fn background_image(bytes: &[u8]) -> Result<RgbImage> {
+    let background =
+        image::load_from_memory(bytes).context("background asset is not a valid image")?;
+    Ok(image::imageops::resize(
+        &background.to_rgb8(),
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+        image::imageops::FilterType::Lanczos3,
+    ))
+}
+
+#[cfg(test)]
+fn background_buffer(bytes: &[u8]) -> Result<Vec<u8>> {
+    Ok(background_image(bytes)?.into_raw())
+}
+
+async fn load_summary_icons(summary: &KillSummary) -> HashMap<String, RgbImage> {
+    let icon_names = summary
+        .top_damage
+        .iter()
+        .chain(&summary.top_healing)
+        .flatten()
+        .filter_map(|entry| entry.icon_name.as_deref())
+        .filter(|name| spec_icon_file(name).is_some())
+        .map(str::to_owned)
+        .collect::<HashSet<_>>();
+    let mut tasks = tokio::task::JoinSet::new();
+    for icon_name in icon_names {
+        tasks.spawn(load_spec_icon(icon_name));
+    }
+
+    let mut icons = HashMap::new();
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok(Ok(Some((name, icon)))) => {
+                icons.insert(name, icon);
+            }
+            Ok(Ok(None)) => {}
+            Ok(Err(error)) => tracing::warn!(error = ?error, "failed to load specialization icon"),
+            Err(error) => tracing::warn!(error = ?error, "specialization icon task failed"),
+        }
+    }
+    icons
+}
+
+async fn load_spec_icon(icon_name: String) -> Result<Option<(String, RgbImage)>> {
+    if let Some(cached) = ICON_CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("specialization icon cache lock poisoned")
+        .get(&icon_name)
+        .cloned()
+    {
+        return Ok(cached.map(|icon| (icon_name, icon)));
+    }
+    let Some(file_name) = spec_icon_file(&icon_name) else {
+        return Ok(None);
+    };
+    match fetch_spec_icon(file_name).await {
+        Ok(icon) => {
+            ICON_CACHE
+                .get()
+                .expect("specialization icon cache initialized")
+                .lock()
+                .expect("specialization icon cache lock poisoned")
+                .insert(icon_name.clone(), Some(icon.clone()));
+            Ok(Some((icon_name, icon)))
+        }
+        Err(error) => {
+            ICON_CACHE
+                .get()
+                .expect("specialization icon cache initialized")
+                .lock()
+                .expect("specialization icon cache lock poisoned")
+                .insert(icon_name, None);
+            Err(error)
+        }
+    }
+}
+
+async fn fetch_spec_icon(file_name: &str) -> Result<RgbImage> {
+    let client = ICON_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(3))
+            .user_agent(concat!(
+                env!("CARGO_PKG_NAME"),
+                "/",
+                env!("CARGO_PKG_VERSION")
+            ))
+            .build()
+            .expect("static specialization icon client configuration is valid")
+    });
+    let bytes = client
+        .get(format!("{ICON_CDN}/{file_name}.jpg"))
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+    let icon = image::imageops::resize(
+        &image::load_from_memory(&bytes)
+            .context("specialization icon response is not a valid image")?
+            .to_rgb8(),
+        ICON_SIZE,
+        ICON_SIZE,
+        image::imageops::FilterType::Lanczos3,
+    );
+    Ok(icon)
+}
+
+fn draw_metric_section(
+    root: &DrawingArea<BitMapBackend<'_>, plotters::coord::Shift>,
+    heading: &str,
+    rate_label: &str,
+    entries: Option<&[MetricEntry]>,
+    fight_total: Option<f64>,
+    icons: &HashMap<String, RgbImage>,
+    duration_seconds: f64,
+    top: i32,
+) -> Result<()> {
+    let section_heading = fight_total.map_or_else(
+        || heading.to_owned(),
+        |total| format!("{heading}  •  {} total", format_number(total)),
+    );
+    root.draw(&Text::new(
+        section_heading,
+        (44, top),
+        ("sans-serif", 17)
+            .into_font()
+            .style(FontStyle::Bold)
+            .color(&RGBColor(242, 140, 40)),
+    ))
+    .context("failed to draw metric heading")?;
+    let Some(entries) = entries.filter(|entries| !entries.is_empty()) else {
+        root.draw(&Text::new(
+            "No data available",
+            (BAR_LEFT, top + 55),
+            ("sans-serif", 18)
+                .into_font()
+                .color(&RGBColor(150, 150, 157)),
+        ))
+        .context("failed to draw unavailable metric label")?;
+        return Ok(());
+    };
+    for (label, x) in [(rate_label, 680), ("TOTAL", 835), ("SHARE", SHARE_RIGHT)] {
+        root.draw(&Text::new(
+            label,
+            (x, top + 2),
+            ("sans-serif", 14)
+                .into_font()
+                .style(FontStyle::Bold)
+                .color(&RGBColor(205, 205, 212))
+                .pos(Pos::new(HPos::Right, VPos::Top)),
+        ))
+        .context("failed to draw metric column heading")?;
+    }
+    let highest = entries[0].total.max(0.0);
+
+    for (index, entry) in entries.iter().take(3).enumerate() {
+        let y = top + 30 + index as i32 * 58;
+        let bar_ratio = if highest > 0.0 {
+            (entry.total / highest).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let share = metric_share(entry.total, fight_total);
+        let color = class_color(entry.class_name.as_deref());
+        let filled_right = BAR_LEFT + ((BAR_RIGHT - BAR_LEFT) as f64 * bar_ratio).round() as i32;
+
+        root.draw(&Rectangle::new(
+            [(BAR_LEFT, y), (BAR_RIGHT, y + BAR_HEIGHT)],
+            RGBColor(43, 43, 48).filled(),
+        ))
+        .context("failed to draw metric bar background")?;
+        if filled_right > BAR_LEFT {
+            root.draw(&Rectangle::new(
+                [(BAR_LEFT, y), (filled_right, y + BAR_HEIGHT)],
+                color.mix(0.68).filled(),
+            ))
+            .context("failed to draw class-colored metric bar")?;
+        }
+        if let Some(icon) = entry
+            .icon_name
+            .as_ref()
+            .and_then(|icon_name| icons.get(icon_name))
+        {
+            let icon = BitMapElement::with_owned_buffer(
+                (44, y + (BAR_HEIGHT - ICON_SIZE as i32) / 2),
+                (ICON_SIZE, ICON_SIZE),
+                icon.clone().into_raw(),
+            )
+            .context("specialization icon has invalid RGB dimensions")?;
+            root.draw(&icon)
+                .context("failed to draw specialization icon")?;
+        } else {
+            root.draw(&Rectangle::new(
+                [(44, y), (82, y + BAR_HEIGHT)],
+                color.filled(),
+            ))
+            .context("failed to draw class icon fallback")?;
+            root.draw(&Text::new(
+                class_icon(entry.class_name.as_deref()),
+                (63, y + BAR_HEIGHT / 2),
+                ("sans-serif", 18)
+                    .into_font()
+                    .style(FontStyle::Bold)
+                    .color(&text_color(color))
+                    .pos(Pos::new(HPos::Center, VPos::Center)),
+            ))
+            .context("failed to draw class icon fallback label")?;
+        }
+        let center_y = y + BAR_HEIGHT / 2;
+        draw_readable_text(
+            root,
+            &truncate(&entry.name, 24),
+            (108, center_y),
+            20,
+            HPos::Left,
+        )?;
+        draw_readable_text(
+            root,
+            &format_number(entry.total / duration_seconds),
+            (680, center_y),
+            18,
+            HPos::Right,
+        )?;
+        draw_readable_text(
+            root,
+            &format_number(entry.total),
+            (835, center_y),
+            18,
+            HPos::Right,
+        )?;
+        draw_readable_text(
+            root,
+            &format!("{:.1}%", share * 100.0),
+            (SHARE_RIGHT, center_y),
+            18,
+            HPos::Right,
+        )?;
+    }
+    Ok(())
+}
+
+fn metric_share(value: f64, fight_total: Option<f64>) -> f64 {
+    fight_total
+        .filter(|total| *total > 0.0)
+        .map_or(0.0, |total| (value / total).clamp(0.0, 1.0))
+}
+
+fn draw_readable_text(
+    root: &DrawingArea<BitMapBackend<'_>, plotters::coord::Shift>,
+    text: &str,
+    position: (i32, i32),
+    size: u32,
+    horizontal_position: HPos,
+) -> Result<()> {
+    let anchor = Pos::new(horizontal_position, VPos::Center);
+    for offset in [(-2, 0), (2, 0), (0, -2), (0, 2)] {
+        root.draw(&Text::new(
+            text.to_owned(),
+            (position.0 + offset.0, position.1 + offset.1),
+            ("sans-serif", size)
+                .into_font()
+                .style(FontStyle::Bold)
+                .color(&BLACK)
+                .pos(anchor),
+        ))
+        .context("failed to draw metric text outline")?;
+    }
+    root.draw(&Text::new(
+        text.to_owned(),
+        position,
+        ("sans-serif", size)
+            .into_font()
+            .style(FontStyle::Bold)
+            .color(&WHITE)
+            .pos(anchor),
+    ))
+    .context("failed to draw metric text")?;
+    Ok(())
+}
+
+fn class_color(class_name: Option<&str>) -> RGBColor {
+    match class_name.unwrap_or_default().to_ascii_lowercase().as_str() {
+        "deathknight" | "death knight" => RGBColor(196, 30, 58),
+        "demonhunter" | "demon hunter" => RGBColor(163, 48, 201),
+        "druid" => RGBColor(255, 124, 10),
+        "evoker" => RGBColor(51, 147, 127),
+        "hunter" => RGBColor(170, 211, 114),
+        "mage" => RGBColor(63, 199, 235),
+        "monk" => RGBColor(0, 255, 152),
+        "paladin" => RGBColor(244, 140, 186),
+        "priest" => RGBColor(255, 255, 255),
+        "rogue" => RGBColor(255, 244, 104),
+        "shaman" => RGBColor(0, 112, 221),
+        "warlock" => RGBColor(135, 136, 238),
+        "warrior" => RGBColor(198, 155, 109),
+        _ => RGBColor(128, 128, 136),
+    }
+}
+
+fn class_icon(class_name: Option<&str>) -> String {
+    match class_name.unwrap_or_default().to_ascii_lowercase().as_str() {
+        "deathknight" | "death knight" => return "DK".to_owned(),
+        "demonhunter" | "demon hunter" => return "DH".to_owned(),
+        _ => {}
+    }
+    let words = class_name
+        .unwrap_or("?")
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    if words.len() > 1 {
+        words
+            .iter()
+            .filter_map(|word| word.chars().next())
+            .take(2)
+            .collect::<String>()
+            .to_uppercase()
+    } else {
+        words
+            .first()
+            .unwrap_or(&"?")
+            .chars()
+            .take(2)
+            .collect::<String>()
+            .to_uppercase()
+    }
+}
+
+fn spec_icon_file(icon_name: &str) -> Option<&'static str> {
+    match icon_name.to_ascii_lowercase().as_str() {
+        "deathknight-blood" => Some("spell_deathknight_bloodpresence"),
+        "deathknight-frost" => Some("spell_deathknight_frostpresence"),
+        "deathknight-unholy" => Some("spell_deathknight_unholypresence"),
+        "demonhunter-havoc" => Some("ability_demonhunter_specdps"),
+        "demonhunter-vengeance" => Some("ability_demonhunter_spectank"),
+        "druid-balance" => Some("spell_nature_starfall"),
+        "druid-feral" => Some("ability_druid_catform"),
+        "druid-guardian" => Some("ability_racial_bearform"),
+        "druid-restoration" => Some("spell_nature_healingtouch"),
+        "evoker-augmentation" => Some("classicon_evoker_augmentation"),
+        "evoker-devastation" => Some("ability_evoker_devastation"),
+        "evoker-preservation" => Some("ability_evoker_preservation"),
+        "hunter-beastmastery" | "hunter-beast mastery" => Some("ability_hunter_bestialdiscipline"),
+        "hunter-marksmanship" => Some("ability_hunter_focusedaim"),
+        "hunter-survival" => Some("ability_hunter_camouflage"),
+        "mage-arcane" => Some("spell_holy_magicalsentry"),
+        "mage-fire" => Some("spell_fire_firebolt02"),
+        "mage-frost" => Some("spell_frost_frostbolt02"),
+        "monk-brewmaster" => Some("spell_monk_brewmaster_spec"),
+        "monk-mistweaver" => Some("spell_monk_mistweaver_spec"),
+        "monk-windwalker" => Some("spell_monk_windwalker_spec"),
+        "paladin-holy" => Some("spell_holy_holybolt"),
+        "paladin-protection" => Some("ability_paladin_shieldofthetemplar"),
+        "paladin-retribution" => Some("spell_holy_auraoflight"),
+        "priest-discipline" => Some("spell_holy_powerwordshield"),
+        "priest-holy" => Some("spell_holy_guardianspirit"),
+        "priest-shadow" => Some("spell_shadow_shadowwordpain"),
+        "rogue-assassination" => Some("ability_rogue_eviscerate"),
+        "rogue-combat" => Some("ability_backstab"),
+        "rogue-outlaw" => Some("ability_rogue_waylay"),
+        "rogue-subtlety" => Some("ability_stealth"),
+        "shaman-elemental" => Some("spell_nature_lightning"),
+        "shaman-enhancement" => Some("spell_nature_lightningshield"),
+        "shaman-restoration" => Some("spell_nature_magicimmunity"),
+        "warlock-affliction" => Some("spell_shadow_deathcoil"),
+        "warlock-demonology" => Some("spell_shadow_metamorphosis"),
+        "warlock-destruction" => Some("spell_shadow_rainoffire"),
+        "warrior-arms" => Some("ability_warrior_savageblow"),
+        "warrior-fury" => Some("ability_warrior_innerrage"),
+        "warrior-protection" => Some("ability_warrior_defensivestance"),
+        _ => None,
+    }
+}
+
+fn text_color(background: RGBColor) -> RGBColor {
+    let brightness = 0.299 * f64::from(background.0)
+        + 0.587 * f64::from(background.1)
+        + 0.114 * f64::from(background.2);
+    if brightness > 155.0 {
+        RGBColor(18, 18, 20)
+    } else {
+        WHITE
+    }
 }
 
 pub fn report_nonce(code: &str) -> Nonce {
@@ -139,29 +637,6 @@ fn format_duration(duration_ms: i64) -> String {
     format!("{minutes}:{seconds:02}")
 }
 
-fn format_metric_entries(entries: Option<&[MetricEntry]>) -> String {
-    let Some(entries) = entries else {
-        return "Unavailable".to_owned();
-    };
-    if entries.is_empty() {
-        return "No entries returned".to_owned();
-    }
-
-    entries
-        .iter()
-        .enumerate()
-        .map(|(index, entry)| {
-            format!(
-                "{}. **{}** — {}",
-                index + 1,
-                entry.name,
-                format_number(entry.total)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 fn format_number(value: f64) -> String {
     let absolute = value.abs();
     if absolute >= 1_000_000_000.0 {
@@ -190,9 +665,19 @@ fn truncate(value: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{fight_nonce, fight_url, format_duration, format_number, report_url};
-    use crate::warcraft_logs::WarcraftLogsSite;
+    use super::{
+        FIGHT_BACKGROUND, IMAGE_HEIGHT, IMAGE_WIDTH, background_buffer, class_color, fight_nonce,
+        fight_url, format_duration, format_number, metric_share, render_kill_summary_with_icons,
+        report_url, spec_icon_file,
+    };
+    use crate::{
+        db::{WclFightRecord, WclPendingFight},
+        warcraft_logs::{KillSummary, MetricEntry, WarcraftLogsSite},
+    };
+    use image::GenericImageView;
+    use plotters::style::RGBColor;
     use poise::serenity_prelude::Nonce;
+    use std::collections::HashMap;
 
     #[test]
     fn builds_canonical_report_urls() {
@@ -212,6 +697,8 @@ mod tests {
         assert_eq!(format_number(999.0), "999");
         assert_eq!(format_number(12_345.0), "12.3K");
         assert_eq!(format_number(9_876_543.0), "9.88M");
+        assert_eq!(metric_share(25.0, Some(100.0)), 0.25);
+        assert_eq!(metric_share(25.0, None), 0.0);
     }
 
     #[test]
@@ -224,5 +711,120 @@ mod tests {
             panic!("expected string nonce");
         };
         assert_eq!(second_value, value);
+    }
+
+    #[test]
+    fn renders_class_colored_metric_bars_as_png() {
+        let fight = WclPendingFight {
+            subscription_id: 1,
+            discord_channel_id: "1".to_owned(),
+            wcl_site: WarcraftLogsSite::Retail,
+            wcl_guild_name: "Guild".to_owned(),
+            report_code: "abc123".to_owned(),
+            report_title: "Raid".to_owned(),
+            report_start_time_ms: 0,
+            fight: WclFightRecord {
+                fight_id: 7,
+                boss_name: "Test Boss".to_owned(),
+                difficulty: Some(5),
+                raid_size: Some(20),
+                average_item_level: Some(700.0),
+                start_time_ms: 0,
+                end_time_ms: 120_000,
+            },
+        };
+        let damage = vec![
+            MetricEntry {
+                name: "First".to_owned(),
+                total: 1_200_000.0,
+                class_name: Some("Mage".to_owned()),
+                icon_name: Some("Mage-Arcane".to_owned()),
+            },
+            MetricEntry {
+                name: "Second".to_owned(),
+                total: 600_000.0,
+                class_name: Some("Warrior".to_owned()),
+                icon_name: Some("Warrior-Arms".to_owned()),
+            },
+        ];
+        let summary = KillSummary {
+            total_damage: Some(1_800_000.0),
+            top_damage: Some(damage.clone()),
+            total_healing: Some(1_800_000.0),
+            top_healing: Some(damage),
+            deaths: Some(0),
+        };
+
+        let png = render_kill_summary_with_icons(&fight, &summary, &HashMap::new()).unwrap();
+        let decoded = image::load_from_memory(&png).unwrap();
+        assert_eq!(decoded.dimensions(), (IMAGE_WIDTH, IMAGE_HEIGHT));
+        assert_eq!(class_color(Some("Mage")), RGBColor(63, 199, 235));
+        assert_eq!(
+            spec_icon_file("Priest-Discipline"),
+            Some("spell_holy_powerwordshield")
+        );
+        assert_eq!(
+            spec_icon_file("DeathKnight-Blood"),
+            Some("spell_deathknight_bloodpresence")
+        );
+        assert_eq!(spec_icon_file("Unknown-Spec"), None);
+    }
+
+    #[test]
+    fn composites_available_specialization_icons() {
+        let fight = test_fight();
+        let entry = MetricEntry {
+            name: "First".to_owned(),
+            total: 1_200_000.0,
+            class_name: Some("Mage".to_owned()),
+            icon_name: Some("Mage-Arcane".to_owned()),
+        };
+        let summary = KillSummary {
+            total_damage: Some(1_200_000.0),
+            top_damage: Some(vec![entry]),
+            total_healing: None,
+            top_healing: None,
+            deaths: Some(0),
+        };
+        let mut icons = HashMap::new();
+        icons.insert(
+            "Mage-Arcane".to_owned(),
+            image::RgbImage::from_pixel(38, 38, image::Rgb([250, 10, 10])),
+        );
+
+        let png = render_kill_summary_with_icons(&fight, &summary, &icons).unwrap();
+        let decoded = image::load_from_memory(&png).unwrap().to_rgb8();
+        let pixel = decoded.get_pixel(45, 121);
+        assert!(pixel[0] > pixel[1] * 5);
+        assert!(pixel[0] > pixel[2] * 5);
+    }
+
+    #[test]
+    fn loads_bundled_background_at_canvas_size() {
+        let background = background_buffer(FIGHT_BACKGROUND).unwrap();
+        assert_eq!(background.len(), (IMAGE_WIDTH * IMAGE_HEIGHT * 3) as usize);
+        assert!(background.windows(2).any(|pixels| pixels[0] != pixels[1]));
+        assert!(background_buffer(b"not an image").is_err());
+    }
+
+    fn test_fight() -> WclPendingFight {
+        WclPendingFight {
+            subscription_id: 1,
+            discord_channel_id: "1".to_owned(),
+            wcl_site: WarcraftLogsSite::Retail,
+            wcl_guild_name: "Guild".to_owned(),
+            report_code: "abc123".to_owned(),
+            report_title: "Raid".to_owned(),
+            report_start_time_ms: 0,
+            fight: WclFightRecord {
+                fight_id: 7,
+                boss_name: "Test Boss".to_owned(),
+                difficulty: Some(5),
+                raid_size: Some(20),
+                average_item_level: Some(700.0),
+                start_time_ms: 0,
+                end_time_ms: 120_000,
+            },
+        }
     }
 }

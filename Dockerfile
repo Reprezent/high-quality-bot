@@ -20,6 +20,7 @@ RUN cargo build --release 2>/dev/null || true
 
 # Copy the real source code, migrations, and vendored proto definitions
 COPY src ./src
+COPY assets ./assets
 COPY migrations ./migrations
 COPY vendor/wowsims-mop/assets/database ./vendor/wowsims-mop/assets/database
 COPY vendor/wowsims-mop/proto ./vendor/wowsims-mop/proto
