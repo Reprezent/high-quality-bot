@@ -22,6 +22,7 @@ const IMAGE_WIDTH: u32 = 1_000;
 const IMAGE_HEIGHT: u32 = 540;
 const BAR_LEFT: i32 = 92;
 const BAR_RIGHT: i32 = 956;
+const SHARE_RIGHT: i32 = BAR_RIGHT - 24;
 const BAR_HEIGHT: i32 = 46;
 const ICON_SIZE: u32 = 38;
 const ICON_CDN: &str = "https://render.worldofwarcraft.com/us/icons/56";
@@ -352,7 +353,7 @@ fn draw_metric_section(
         .context("failed to draw unavailable metric label")?;
         return Ok(());
     };
-    for (label, x) in [(rate_label, 680), ("TOTAL", 835), ("SHARE", 956)] {
+    for (label, x) in [(rate_label, 680), ("TOTAL", 835), ("SHARE", SHARE_RIGHT)] {
         root.draw(&Text::new(
             label,
             (x, top + 2),
@@ -444,7 +445,7 @@ fn draw_metric_section(
         draw_readable_text(
             root,
             &format!("{:.1}%", share * 100.0),
-            (956, center_y),
+            (SHARE_RIGHT, center_y),
             18,
             HPos::Right,
         )?;
