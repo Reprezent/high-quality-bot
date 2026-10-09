@@ -1,3 +1,4 @@
+pub mod character;
 pub mod dailies;
 pub mod piss;
 pub mod pisscribe;

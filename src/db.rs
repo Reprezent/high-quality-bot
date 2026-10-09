@@ -35,6 +35,10 @@ pub async fn create_pool(connect_options: PgConnectOptions) -> Result<PgPool> {
         .execute(&pool)
         .await?;
 
+    sqlx::raw_sql(include_str!("../migrations/006_wow_characters.sql"))
+        .execute(&pool)
+        .await?;
+
     Ok(pool)
 }
 
@@ -920,6 +924,80 @@ pub async fn clear_wcl_subscription_error(pool: &PgPool, subscription_id: i64) -
 }
 
 // ---------------------------------------------------------------------------
+// World of Warcraft characters
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+pub struct NewWowCharacter<'a> {
+    pub discord_user_id: &'a str,
+    pub region: &'a str,
+    pub realm_name: &'a str,
+    pub realm_name_normalized: &'a str,
+    pub character_name: &'a str,
+    pub character_name_normalized: &'a str,
+}
+
+/// Store a character, returning false when the user already has it stored.
+pub async fn store_wow_character(pool: &PgPool, character: NewWowCharacter<'_>) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        INSERT INTO wow_characters (
+            discord_user_id,
+            region,
+            realm_name,
+            realm_name_normalized,
+            character_name,
+            character_name_normalized
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (
+            discord_user_id,
+            region,
+            realm_name_normalized,
+            character_name_normalized
+        ) DO NOTHING
+        "#,
+    )
+    .bind(character.discord_user_id)
+    .bind(character.region)
+    .bind(character.realm_name)
+    .bind(character.realm_name_normalized)
+    .bind(character.character_name)
+    .bind(character.character_name_normalized)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() == 1)
+}
+
+/// Remove one of a user's characters, returning whether it existed.
+pub async fn remove_wow_character(
+    pool: &PgPool,
+    discord_user_id: &str,
+    region: &str,
+    realm_name_normalized: &str,
+    character_name_normalized: &str,
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        DELETE FROM wow_characters
+        WHERE discord_user_id = $1
+          AND region = $2
+          AND realm_name_normalized = $3
+          AND character_name_normalized = $4
+        "#,
+    )
+    .bind(discord_user_id)
+    .bind(region)
+    .bind(realm_name_normalized)
+    .bind(character_name_normalized)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() == 1)
+}
+
+// ---------------------------------------------------------------------------
 // ISS telemetry history
 // ---------------------------------------------------------------------------
 
@@ -1115,14 +1193,56 @@ pub async fn mark_pisstory_subscription_failed(
 #[cfg(test)]
 mod tests {
     use super::{
-        NewWclSubscription, WclFightRecord, WclReportRecord, get_wcl_subscription,
+        NewWclSubscription, NewWowCharacter, WclFightRecord, WclReportRecord, get_wcl_subscription,
         list_pending_wcl_fights, list_wcl_reports_to_announce, list_wcl_reports_to_inspect,
         mark_wcl_fight_posted, mark_wcl_report_posted, reconcile_wcl_reports,
-        remove_wcl_subscription, replace_wcl_subscription,
+        remove_wcl_subscription, remove_wow_character, replace_wcl_subscription,
+        store_wow_character,
     };
     use crate::warcraft_logs::WarcraftLogsSite;
     use sqlx::PgPool;
     use uuid::Uuid;
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL pointing to PostgreSQL"]
+    async fn stores_and_removes_characters_for_the_owning_user() {
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set");
+        let pool = PgPool::connect(&database_url).await.unwrap();
+        sqlx::raw_sql(include_str!("../migrations/006_wow_characters.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let owner_id = format!("character-owner-{}", Uuid::new_v4());
+        let other_user_id = format!("character-other-{}", Uuid::new_v4());
+        let character = NewWowCharacter {
+            discord_user_id: &owner_id,
+            region: "us",
+            realm_name: "Area 52",
+            realm_name_normalized: "area 52",
+            character_name: "Thrall",
+            character_name_normalized: "thrall",
+        };
+
+        assert!(store_wow_character(&pool, character).await.unwrap());
+        assert!(!store_wow_character(&pool, character).await.unwrap());
+        assert!(
+            !remove_wow_character(&pool, &other_user_id, "us", "area 52", "thrall")
+                .await
+                .unwrap()
+        );
+        assert!(
+            remove_wow_character(&pool, &owner_id, "us", "area 52", "thrall")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !remove_wow_character(&pool, &owner_id, "us", "area 52", "thrall")
+                .await
+                .unwrap()
+        );
+    }
 
     #[tokio::test]
     #[ignore = "requires TEST_DATABASE_URL pointing to PostgreSQL"]
